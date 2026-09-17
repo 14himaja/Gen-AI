@@ -1,0 +1,15 @@
+=======================================================
+AI PERSONAL TUTOR - STUDENT STUDY NOTES (NOTEPAD)
+=======================================================
+Student:          Himaja
+Subject:          Python
+Goal:             Semester Exam Prep
+Completed Topics: Functions & Scope, Variables & Data Structures, intro to python
+=======================================================
+
+MY PERSONAL STUDY NOTES:
+-------------------------------------------------------
+Python uses the LEGB rule for variable resolution: Local -> Enclosing -> Global -> Built-in. Functions are first-class citizens, meaning they can be assigned to variables, passed as arguments, and returned from other functions.
+-------------------------------------------------------
+
+Exported from SYNXA AI Personal Tutor
