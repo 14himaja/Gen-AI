@@ -1,0 +1,274 @@
+"""Admin Management and Hospital Document Chunking API Router."""
+
+from typing import Annotated, List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
+from pydantic import BaseModel
+
+from app.api.auth import get_current_user
+from app.database import db
+from app.models import User, UserRole, UserLogin, Token, UserResponse
+from app.api.auth import create_access_token, hash_password
+
+
+router = APIRouter(prefix="/admin", tags=["Admin Dashboard & Document Chunking"])
+
+
+def require_admin(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+    """Dependency enforcing Admin role."""
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Admin privileges required."
+        )
+    return current_user
+
+
+class AdminDocumentCreate(BaseModel):
+    title: str
+    category: Optional[str] = "General Guidelines"
+    content: Optional[str] = ""
+
+
+def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
+    """Extract clean text content from uploaded PDF, TXT, or document file."""
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if ext == "pdf":
+        text_parts = []
+        try:
+            import fitz
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for page in doc:
+                t = page.get_text("text")
+                if t and t.strip():
+                    text_parts.append(t.strip())
+            if text_parts:
+                return "\n\n".join(text_parts)
+        except Exception:
+            pass
+
+        try:
+            import pdfplumber
+            import io
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t and t.strip():
+                        text_parts.append(t.strip())
+                if text_parts:
+                    return "\n\n".join(text_parts)
+        except Exception:
+            pass
+
+    try:
+        return file_bytes.decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+@router.post("/login", response_model=Token)
+async def admin_login(payload: UserLogin):
+    """Authenticate administrator credentials."""
+    user = db.get_user_by_email(payload.email)
+    if not user or user.hashed_password != hash_password(payload.password):
+        raise HTTPException(status_code=401, detail="Incorrect admin email or password.")
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Account is not an administrator.")
+
+    token = create_access_token(user)
+    return Token(
+        access_token=token,
+        user=UserResponse(
+            user_id=user.user_id,
+            name=user.name,
+            email=user.email,
+            phone=user.phone,
+            role=user.role,
+            is_verified=user.is_verified,
+            preferences=user.preferences
+        )
+    )
+
+
+@router.post("/documents", response_model=dict, status_code=status.HTTP_201_CREATED)
+async def upload_hospital_document(
+    payload: AdminDocumentCreate,
+    admin: Annotated[User, Depends(require_admin)]
+):
+    """
+    Upload a new hospital policy / medical guideline document via JSON.
+    The backend automatically applies semantic text chunking (300-500 char sliding window)
+    and indexes the chunks for multi-source RAG search.
+    """
+    title = payload.title.strip() if payload.title else "Untitled Document"
+    content = payload.content.strip() if payload.content else ""
+
+    if not content:
+        raise HTTPException(status_code=400, detail="Document content cannot be empty.")
+
+    result = db.add_hospital_document(
+        title=title,
+        category=payload.category or "General Guidelines",
+        uploaded_by=admin.user_id,
+        content=content
+    )
+
+    return {
+        "status": "success",
+        "message": f"Hospital document '{title}' uploaded and split into {result['chunk_count']} RAG chunks.",
+        "document": result
+    }
+
+
+@router.post("/documents/upload", response_model=dict, status_code=status.HTTP_201_CREATED)
+async def upload_hospital_document_file(
+    admin: Annotated[User, Depends(require_admin)],
+    file: Optional[UploadFile] = File(None),
+    title: Optional[str] = Form(None),
+    category: Optional[str] = Form("General Guidelines"),
+    content: Optional[str] = Form(None)
+):
+    """
+    Upload a hospital document file (PDF / TXT / DOCX) or raw text.
+    Extracts text automatically, performs sliding window chunking, and indexes for RAG search.
+    """
+    extracted_text = ""
+    file_title = title.strip() if title and title.strip() else ""
+
+    if file:
+        if not file_title:
+            file_title = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
+        file_bytes = await file.read()
+        extracted_text = extract_text_from_file(file_bytes, file.filename)
+
+    final_content = (extracted_text + "\n\n" + (content or "")).strip() if extracted_text else (content or "").strip()
+    final_title = file_title or "Untitled Hospital Document"
+    final_category = category.strip() if category and category.strip() else "General Guidelines"
+
+    if not final_content:
+        raise HTTPException(status_code=400, detail="No readable text found in uploaded file or text area.")
+
+    result = db.add_hospital_document(
+        title=final_title,
+        category=final_category,
+        uploaded_by=admin.user_id,
+        content=final_content
+    )
+
+    return {
+        "status": "success",
+        "message": f"Hospital document '{final_title}' uploaded and split into {result['chunk_count']} RAG chunks.",
+        "document": result
+    }
+
+
+@router.get("/documents", response_model=dict)
+async def list_hospital_documents(admin: Annotated[User, Depends(require_admin)]):
+    """List all admin-uploaded hospital documents and their RAG chunk counts."""
+    docs = db.get_hospital_documents()
+    return {
+        "status": "success",
+        "count": len(docs),
+        "documents": docs
+    }
+
+
+@router.get("/documents/{doc_id}/chunks", response_model=dict)
+async def get_document_chunks(
+    doc_id: str,
+    admin: Annotated[User, Depends(require_admin)]
+):
+    """View exact chunked data text blocks for a specific hospital document."""
+    chunks = db.get_hospital_doc_chunks(doc_id=doc_id)
+    return {
+        "status": "success",
+        "doc_id": doc_id,
+        "chunk_count": len(chunks),
+        "chunks": chunks
+    }
+
+
+@router.delete("/documents/{doc_id}", response_model=dict)
+async def delete_hospital_document(
+    doc_id: str,
+    admin: Annotated[User, Depends(require_admin)]
+):
+    """Delete a hospital document and clear its chunks from RAG index."""
+    success = db.delete_hospital_document(doc_id=doc_id, user_id=admin.user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    return {
+        "status": "success",
+        "message": f"Document {doc_id} and its associated RAG chunks deleted."
+    }
+
+
+@router.get("/stats", response_model=dict)
+async def get_system_stats(admin: Annotated[User, Depends(require_admin)]):
+    """Retrieve overall system stats for Admin Dashboard."""
+    users = db.get_all_users()
+    appts = db.get_all_appointments()
+    docs = db.get_all_documents()
+    hdocs = db.get_hospital_documents()
+    chunks = db.get_hospital_doc_chunks()
+
+    return {
+        "status": "success",
+        "stats": {
+            "total_users": len(users),
+            "total_patients": sum(1 for u in users if u.role == UserRole.PATIENT),
+            "total_doctors": len(db.get_doctors()),
+            "total_appointments": len(appts),
+            "total_patient_documents": len(docs),
+            "total_hospital_documents": len(hdocs),
+            "total_rag_chunks": len(chunks)
+        }
+    }
+
+
+@router.get("/patients", response_model=dict)
+async def list_registered_patients(admin: Annotated[User, Depends(require_admin)]):
+    """Retrieve list of all registered patients for Admin Directory."""
+    users = db.get_all_users()
+    patients = [
+        {
+            "user_id": u.user_id,
+            "name": u.name,
+            "email": u.email,
+            "phone": u.phone or "N/A",
+            "role": u.role.value,
+            "is_verified": u.is_verified,
+            "created_at": u.created_at.strftime("%Y-%m-%d %H:%M")
+        }
+        for u in users if u.role == UserRole.PATIENT
+    ]
+    return {
+        "status": "success",
+        "count": len(patients),
+        "patients": patients
+    }
+
+
+@router.get("/appointments", response_model=dict)
+async def list_all_hospital_appointments(admin: Annotated[User, Depends(require_admin)]):
+    """Retrieve all booked appointments across the hospital for Admin Ledger."""
+    appts = db.get_all_appointments()
+    result = [
+        {
+            "id": a.id,
+            "user_id": a.user_id,
+            "doctor_name": a.doctor_name,
+            "department_name": a.department_name,
+            "date": a.date,
+            "time": a.time,
+            "status": a.status.value,
+            "notes": a.notes or "Routine consultation"
+        }
+        for a in appts
+    ]
+    return {
+        "status": "success",
+        "count": len(result),
+        "appointments": result
+    }
+

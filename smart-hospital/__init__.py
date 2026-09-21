@@ -1,1 +1,0 @@
-"""Smart Hospital Operations Package."""
