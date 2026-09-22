@@ -16,7 +16,9 @@ const state = {
   pendingFiles: [],
   conversations: [{ id: 'current', title: 'Current Session', time: 'Now', messages: [] }],
   activeConvId: 'current',
-  selectedDocForModal: null
+  selectedDocForModal: null,
+  currentReportsFilter: 'all',
+  cachedReports: []
 };
 
 const PRESEEDED = {
@@ -67,6 +69,20 @@ const closeDocViewModal  = $('closeDocViewModal');
 const closeDocViewModal2 = $('closeDocViewModal2');
 const askAiDocBtn   = $('askAiDocBtn');
 const agentDot      = $('agentDot');
+
+// Right-Side Patient Lab Reports Sidebar
+const reportsSidebar          = $('reportsSidebar');
+const toggleReportsSidebarBtn = $('toggleReportsSidebarBtn');
+const closeReportsSidebarBtn  = $('closeReportsSidebarBtn');
+const refreshReportsBtn       = $('refreshReportsBtn');
+const patientReportsList      = $('patientReportsList');
+const reportsFilterRow        = $('reportsFilterRow');
+const sidebarUploadReportBtn  = $('sidebarUploadReportBtn');
+const sidebarReportFileInput  = $('sidebarReportFileInput');
+const reportsCountBadge       = $('reportsCountBadge');
+const countFilterAll          = $('countFilterAll');
+const countFilterLab          = $('countFilterLab');
+const countFilterRx           = $('countFilterRx');
 
 // Portal and Admin views
 const portalSelectModal     = $('portalSelectModal');
@@ -166,7 +182,7 @@ function setupEventListeners() {
       const chip = e.target.closest('.qchip');
       if (!chip) return;
       const prompt = chip.dataset.prompt;
-      if (chip.id === 'slotChip' || prompt.toLowerCase().includes('slot')) {
+      if (chip.id === 'slotChip') {
         toggleSlotPanel(true);
       } else {
         sendMessage(prompt);
@@ -188,6 +204,39 @@ function setupEventListeners() {
 
   const refreshAppointmentsBtn = $('refreshAppointmentsBtn');
   if (refreshAppointmentsBtn) refreshAppointmentsBtn.addEventListener('click', () => loadUserAppointmentsSidebar());
+
+  // Right-Side Lab Reports Sidebar Controls
+  if (toggleReportsSidebarBtn) toggleReportsSidebarBtn.addEventListener('click', () => toggleReportsSidebar());
+  if (closeReportsSidebarBtn) closeReportsSidebarBtn.addEventListener('click', () => toggleReportsSidebar(false));
+  if (refreshReportsBtn) refreshReportsBtn.addEventListener('click', () => loadUserLabReports());
+
+  if (reportsFilterRow) {
+    reportsFilterRow.addEventListener('click', e => {
+      const btn = e.target.closest('.report-filter-btn');
+      if (!btn) return;
+      reportsFilterRow.querySelectorAll('.report-filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.currentReportsFilter = btn.dataset.filter || 'all';
+      renderUserLabReports();
+    });
+  }
+
+  if (sidebarUploadReportBtn && sidebarReportFileInput) {
+    sidebarUploadReportBtn.addEventListener('click', () => sidebarReportFileInput.click());
+    sidebarReportFileInput.addEventListener('change', async () => {
+      const files = Array.from(sidebarReportFileInput.files);
+      if (!files || files.length === 0) return;
+      sidebarUploadReportBtn.disabled = true;
+      sidebarUploadReportBtn.innerHTML = '<span>⏳</span> Uploading & Analyzing...';
+      const prompt = `[Attached: ${files.map(f => f.name).join(', ')}] Please analyze this medical document / lab report and explain the clinical findings and medicines.`;
+      appendUserMessage(prompt, files);
+      await sendToBackend(prompt, files);
+      sidebarReportFileInput.value = '';
+      sidebarUploadReportBtn.disabled = false;
+      sidebarUploadReportBtn.innerHTML = '<span style="font-size:1rem">📤</span> Upload Lab Report / Prescription';
+      await loadUserLabReports();
+    });
+  }
 
   // File upload
   if (attachBtn) attachBtn.addEventListener('click', () => fileInput.click());
@@ -452,6 +501,35 @@ function setupAdminNavigation() {
       });
     }
   });
+
+  const refreshApptsBtn = $('adminRefreshApptsBtn');
+  if (refreshApptsBtn) {
+    refreshApptsBtn.addEventListener('click', async () => {
+      refreshApptsBtn.textContent = '⏳ Refreshing...';
+      await loadAdminAppointmentsTable();
+      await loadAdminStats();
+      refreshApptsBtn.textContent = '🔄 Refresh Ledger';
+    });
+  }
+
+  // Live admin portal sync when appointment is booked, completed, or cancelled
+  window.addEventListener('appointmentUpdated', () => {
+    if (adminDashboardView && adminDashboardView.style.display !== 'none') {
+      loadAdminAppointmentsTable();
+      loadAdminStats();
+    }
+  });
+
+  // Background polling for admin appointments ledger
+  setInterval(() => {
+    if (adminDashboardView && adminDashboardView.style.display !== 'none') {
+      const apptsSec = $('adminSecAppts');
+      if (apptsSec && apptsSec.style.display !== 'none') {
+        loadAdminAppointmentsTable();
+      }
+      loadAdminStats();
+    }
+  }, 10000);
 }
 
 
@@ -462,6 +540,8 @@ async function switchToPatientMode(patientId = 'P1001') {
   adminDashboardView.style.display = 'none';
   if (sidebar) sidebar.style.display = 'flex';
   if (chatMain) chatMain.style.display = 'flex';
+  if (reportsSidebar) reportsSidebar.style.display = 'flex';
+  if (toggleReportsSidebarBtn) toggleReportsSidebarBtn.style.display = 'inline-flex';
 
   // If currently authenticated as Admin or missing patient token, switch to requested patient account
   if (!state.currentUser.token || state.currentUser.role === 'admin' || state.currentUser.user_id === 'A4001') {
@@ -474,6 +554,8 @@ async function switchToPatientMode(patientId = 'P1001') {
 async function switchToAdminMode() {
   if (sidebar) sidebar.style.display = 'none';
   if (chatMain) chatMain.style.display = 'none';
+  if (reportsSidebar) reportsSidebar.style.display = 'none';
+  if (toggleReportsSidebarBtn) toggleReportsSidebarBtn.style.display = 'none';
   adminDashboardView.style.display = 'flex';
 
   await loadAdminStats();
@@ -715,7 +797,10 @@ async function loadUserAppointmentsSidebar() {
         let deleteBtn = '';
         if (st === 'cancelled') {
           color = '#ef4444';
-          deleteBtn = `<button class="purge-appt-btn" data-id="${escHtml(a.id)}" title="Delete cancelled appointment record" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:0.8rem; padding:0 2px; margin-left:4px">🗑️</button>`;
+          deleteBtn = `<button class="purge-appt-btn" data-id="${escHtml(a.id)}" data-status="${escHtml(st)}" title="Delete cancelled appointment record" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:0.8rem; padding:0 2px; margin-left:4px">🗑️</button>`;
+        } else if (st === 'completed') {
+          color = '#8b5cf6';
+          deleteBtn = `<button class="purge-appt-btn" data-id="${escHtml(a.id)}" data-status="${escHtml(st)}" title="Delete completed appointment record" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:0.8rem; padding:0 2px; margin-left:4px">🗑️</button>`;
         }
         return `
           <div style="background:var(--bg-secondary); border:1px solid var(--border-subtle); border-radius:6px; padding:6px 8px; font-size:0.75rem">
@@ -736,11 +821,13 @@ async function loadUserAppointmentsSidebar() {
       container.querySelectorAll('.purge-appt-btn').forEach(btn => {
         btn.addEventListener('click', async (e) => {
           e.stopPropagation();
-          if (confirm('Delete this cancelled appointment record from your history?')) {
+          const stLabel = btn.dataset.status || 'appointment';
+          if (confirm(`Delete this ${stLabel} appointment record from your history?`)) {
             try {
               const headers = state.currentUser && state.currentUser.token ? { 'Authorization': `Bearer ${state.currentUser.token}` } : {};
               await fetch(`/api/hospital/appointments/${btn.dataset.id}/purge`, { method: 'DELETE', headers });
               await loadUserAppointmentsSidebar();
+              window.dispatchEvent(new CustomEvent('appointmentUpdated'));
             } catch (err) {
               alert('Failed to delete appointment record.');
             }
@@ -761,7 +848,196 @@ function updatePatientUI() {
 
   loadConversations();
   loadUserAppointmentsSidebar();
+  loadUserLabReports();
 }
+
+// ============================================================
+// PATIENT LAB REPORTS & MEDICAL RECORDS (RIGHT SIDEBAR)
+// ============================================================
+function toggleReportsSidebar(forceState = null) {
+  if (!reportsSidebar) return;
+  if (forceState === true) {
+    reportsSidebar.classList.remove('collapsed');
+    if (toggleReportsSidebarBtn) toggleReportsSidebarBtn.classList.add('active');
+  } else if (forceState === false) {
+    reportsSidebar.classList.add('collapsed');
+    if (toggleReportsSidebarBtn) toggleReportsSidebarBtn.classList.remove('active');
+  } else {
+    const isNowCollapsed = reportsSidebar.classList.toggle('collapsed');
+    if (toggleReportsSidebarBtn) {
+      if (isNowCollapsed) toggleReportsSidebarBtn.classList.remove('active');
+      else toggleReportsSidebarBtn.classList.add('active');
+    }
+  }
+}
+
+async function loadUserLabReports() {
+  if (!patientReportsList) return;
+  try {
+    const headers = state.currentUser && state.currentUser.token ? { 'Authorization': `Bearer ${state.currentUser.token}` } : {};
+    const res = await fetch('/api/hospital/documents', { headers });
+    if (res.ok) {
+      const docs = await res.json();
+      state.cachedReports = docs || [];
+      updateReportsBadges();
+      renderUserLabReports();
+    } else {
+      patientReportsList.innerHTML = '<div style="color:var(--text-muted); padding:16px; font-size:0.8rem; text-align:center">Unable to load records. Please log in.</div>';
+    }
+  } catch (err) {
+    patientReportsList.innerHTML = '<div style="color:var(--danger); padding:16px; font-size:0.8rem; text-align:center">Connection error loading reports.</div>';
+  }
+}
+
+function updateReportsBadges() {
+  const docs = state.cachedReports || [];
+  const labCount = docs.filter(d => d.document_type === 'laboratory_report').length;
+  const rxCount = docs.filter(d => d.document_type === 'prescription').length;
+
+  if (reportsCountBadge) reportsCountBadge.textContent = docs.length;
+  if (countFilterAll) countFilterAll.textContent = docs.length;
+  if (countFilterLab) countFilterLab.textContent = labCount;
+  if (countFilterRx) countFilterRx.textContent = rxCount;
+}
+
+function renderUserLabReports() {
+  if (!patientReportsList) return;
+  const docs = state.cachedReports || [];
+  const filter = state.currentReportsFilter || 'all';
+
+  let filtered = docs;
+  if (filter === 'laboratory_report') {
+    filtered = docs.filter(d => d.document_type === 'laboratory_report');
+  } else if (filter === 'prescription') {
+    filtered = docs.filter(d => d.document_type === 'prescription');
+  }
+
+  if (filtered.length === 0) {
+    patientReportsList.innerHTML = `
+      <div style="text-align:center; padding:36px 16px; color:var(--text-muted)">
+        <div style="font-size:2rem; margin-bottom:8px">🧪</div>
+        <div style="font-weight:600; font-size:0.88rem; color:var(--text-primary)">No ${filter === 'all' ? 'Lab Reports' : filter.replace('_', ' ')} Found</div>
+        <div style="font-size:0.75rem; margin-top:4px">Upload a lab report or prescription below to store and analyze it with AI.</div>
+      </div>
+    `;
+    return;
+  }
+
+  patientReportsList.innerHTML = filtered.map(doc => {
+    const isLab = doc.document_type === 'laboratory_report';
+    const isRx = doc.document_type === 'prescription';
+    const badgeClass = isLab ? 'badge-lab' : (isRx ? 'badge-rx' : 'badge-gen');
+    const badgeLabel = isLab ? '🧪 Lab Report' : (isRx ? '💊 Prescription' : '📄 Document');
+    const previewSummary = doc.summary || (doc.extracted_text ? doc.extracted_text.substring(0, 140) + '...' : 'No summary provided.');
+    
+    let findingsHtml = '';
+    if (doc.key_findings && doc.key_findings.length > 0) {
+      findingsHtml = `
+        <div class="report-card-findings">
+          ${doc.key_findings.slice(0, 3).map(f => `<span class="report-finding-tag">✓ ${escHtml(f)}</span>`).join('')}
+        </div>
+      `;
+    }
+
+    return `
+      <div class="report-card" data-id="${escHtml(doc.id)}">
+        <div class="report-card-header">
+          <div class="report-card-title">${escHtml(doc.title)}</div>
+          <span class="report-card-badge ${badgeClass}">${badgeLabel}</span>
+        </div>
+        <div class="report-card-meta">
+          <span>📅 ${escHtml(doc.upload_date || 'Recent')}</span>
+          <span>🆔 ${escHtml(doc.id)}</span>
+        </div>
+        <div class="report-card-summary">${escHtml(previewSummary)}</div>
+        ${findingsHtml}
+        <div class="report-card-actions">
+          <button class="report-action-btn view-btn" data-id="${escHtml(doc.id)}">👁️ View Details</button>
+          <button class="report-action-btn ask-btn" data-id="${escHtml(doc.id)}">💬 Ask AI</button>
+          <button class="report-action-btn delete-btn" data-id="${escHtml(doc.id)}" style="background:rgba(239,68,68,0.1); color:#ef4444; border:1px solid rgba(239,68,68,0.3)">🗑️ Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Attach button event listeners
+  patientReportsList.querySelectorAll('.view-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const doc = docs.find(d => d.id === btn.dataset.id);
+      if (doc) openReportModal(doc);
+    });
+  });
+
+  patientReportsList.querySelectorAll('.ask-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const doc = docs.find(d => d.id === btn.dataset.id);
+      if (doc) {
+        sendMessage(`Please explain my lab report "${doc.title}" and provide clinical guidance on the findings.`);
+      }
+    });
+  });
+
+  patientReportsList.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteUserDocument(btn.dataset.id);
+    });
+  });
+}
+
+async function deleteUserDocument(docId) {
+  if (!confirm(`Are you sure you want to delete this document (${docId})?`)) return;
+  try {
+    const res = await apiFetch(`/api/hospital/documents/${docId}`, { method: 'DELETE' });
+    if (res.ok) {
+      showNotification('Document deleted successfully', 'success');
+      if (typeof docViewModal !== 'undefined' && docViewModal && docViewModal.style.display !== 'none') {
+        hideModal(docViewModal);
+      }
+      await loadUserLabReports();
+    } else {
+      const err = await res.json();
+      showNotification(err.detail || 'Failed to delete document', 'error');
+    }
+  } catch (err) {
+    console.error(err);
+    showNotification('Error deleting document', 'error');
+  }
+}
+
+function openReportModal(doc) {
+  state.selectedDocForModal = doc;
+  const isLab = doc.document_type === 'laboratory_report';
+  const isRx = doc.document_type === 'prescription';
+  const typeLabel = isLab ? '🧪 Laboratory Report' : (isRx ? '💊 Prescription' : '📄 Medical Record');
+
+  if ($('docModalTitle')) $('docModalTitle').textContent = doc.title;
+  if ($('docModalMeta')) $('docModalMeta').textContent = `Document ID: ${doc.id} · Type: ${typeLabel} · Upload Date: ${doc.upload_date}`;
+  if ($('docModalSummary')) $('docModalSummary').textContent = doc.summary || 'Summary generated from extracted clinical findings.';
+  
+  const findingsContainer = $('docModalFindings');
+  if (findingsContainer) {
+    if (doc.key_findings && doc.key_findings.length > 0) {
+      findingsContainer.innerHTML = doc.key_findings.map(f => `
+        <span style="font-size:0.75rem; background:rgba(16,185,129,0.15); color:var(--success); border:1px solid rgba(16,185,129,0.3); border-radius:12px; padding:3px 10px; font-weight:600">✓ ${escHtml(f)}</span>
+      `).join('');
+    } else {
+      findingsContainer.innerHTML = '<span style="font-size:0.75rem; color:var(--text-muted)">No specific abnormal tags flagged.</span>';
+    }
+  }
+
+  if ($('docModalContent')) $('docModalContent').textContent = doc.extracted_text || 'No raw text available.';
+  
+  const deleteModalBtn = $('deleteDocModalBtn');
+  if (deleteModalBtn) {
+    deleteModalBtn.onclick = () => deleteUserDocument(doc.id);
+  }
+
+  showModal(docViewModal);
+}
+
 
 async function handleLogin(e) {
   e.preventDefault();
@@ -905,11 +1181,14 @@ async function fetchAllSlots() {
 // ============================================================
 // SLOT PICKER PANEL
 // ============================================================
-function toggleSlotPanel(force) {
+async function toggleSlotPanel(force) {
   if (!slotPickerPanel) return;
   const show = force !== undefined ? force : (slotPickerPanel.style.display === 'none');
   slotPickerPanel.style.display = show ? 'block' : 'none';
-  if (show) renderSlotPanel();
+  if (show) {
+    await fetchAllSlots();
+    renderSlotPanel();
+  }
 }
 
 function renderSlotPanel() {
@@ -963,16 +1242,26 @@ function renderSlotDoctors(dept) {
     const dateKeys = Object.keys(byDate).sort().slice(0, 3);
 
     const slotsHtml = dateKeys.length === 0
-      ? '<span style="font-size:0.75rem;color:var(--text-muted)">No open slots found</span>'
+      ? '<span style="font-size:0.75rem;color:var(--text-muted)">No slots found</span>'
       : dateKeys.map(dateStr => `
-          <div style="margin-bottom:6px">
-            <span style="font-size:0.72rem;color:var(--text-muted);display:block;margin-bottom:2px">📅 ${dateStr}</span>
-            <div style="display:flex;gap:4px;flex-wrap:wrap">
-              ${byDate[dateStr].map(s => `
-                <button class="slot-time-btn" data-docid="${escHtml(doc.id)}" data-docname="${escHtml(doc.name)}" data-dept="${escHtml(doc.department || doc.department_name)}" data-date="${escHtml(s.date)}" data-time="${escHtml(s.time)}">
-                  ${escHtml(s.time)}
-                </button>
-              `).join('')}
+          <div style="margin-bottom:8px">
+            <span style="font-size:0.74rem;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">📅 ${dateStr}</span>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              ${byDate[dateStr].map(s => {
+                const isAvail = s.is_available !== false;
+                if (!isAvail) {
+                  return `
+                    <button class="slot-time-btn booked" disabled aria-disabled="true" title="Already booked by another patient">
+                      🕒 ${escHtml(s.time)} <span class="slot-booked-tag">Booked</span>
+                    </button>
+                  `;
+                }
+                return `
+                  <button class="slot-time-btn" title="Click to book with ${escHtml(doc.name)} at ${escHtml(s.time)}" data-docid="${escHtml(doc.id)}" data-docname="${escHtml(doc.name)}" data-dept="${escHtml(doc.department || doc.department_name)}" data-date="${escHtml(s.date)}" data-time="${escHtml(s.time)}">
+                    🕒 ${escHtml(s.time)}
+                  </button>
+                `;
+              }).join('')}
             </div>
           </div>
         `).join('');
@@ -993,7 +1282,7 @@ function renderSlotDoctors(dept) {
     `;
   }).join('');
 
-  slotDoctorsList.querySelectorAll('.slot-time-btn').forEach(btn => {
+  slotDoctorsList.querySelectorAll('.slot-time-btn:not([disabled]):not(.booked)').forEach(btn => {
     btn.addEventListener('click', () => {
       toggleSlotPanel(false);
       sendMessage(`Please book an appointment with ${btn.dataset.docname} (${btn.dataset.dept}) on ${btn.dataset.date} at ${btn.dataset.time}`);
@@ -1158,22 +1447,10 @@ async function sendToBackend(prompt, files = []) {
       const responseText = data.reply || data.response || "I am here to assist you. How can I help you today?";
       appendAiMessage(responseText, data.active_agent, data.route, data.requires_confirmation, data.confirmation_details);
 
-      // Refresh appointments sidebar in case an appointment was booked/cancelled
+      // Refresh appointments and lab reports sidebar in case an appointment was booked or document uploaded
       loadUserAppointmentsSidebar();
-
-      // Auto-open slot picker ONLY when explicitly asking about appointment slots or booking
-      const lowerPrompt = prompt.toLowerCase();
-      const lowerReply = responseText.toLowerCase();
-      const slotTriggerPatterns = [
-        /appointment.*slot/i, /slot.*appointment/i, /available.*slot/i, /slot.*available/i,
-        /book.*appoint/i, /appoint.*book/i, /available.*appointment/i, /appointment.*available/i,
-        /show.*slot/i, /book.*slot/i, /open.*slot/i, /find.*slot/i
-      ];
-      const promptWantsSlots = slotTriggerPatterns.some(p => p.test(lowerPrompt));
-      const replyMentionsSlots = /available.*slot|slot.*available|pick.*slot|select.*slot|slot.*picker/i.test(lowerReply);
-      if (promptWantsSlots || replyMentionsSlots) {
-        toggleSlotPanel(true);
-      }
+      loadUserLabReports();
+      window.dispatchEvent(new CustomEvent('appointmentUpdated'));
     } else {
       const err = await res.json();
       appendAiMessage(`⚠️ Error: ${err.detail || 'Unable to process request.'}`, 'hospital_root_agent');
@@ -1293,9 +1570,22 @@ function clearChat(silent = false) {
   }
 }
 
+function agentLabel(name) {
+  const map = {
+    hospital_root_agent: 'ApolloCare AI Assistant',
+    appointment_agent: 'Appointments Specialist',
+    document_agent: 'Medical Records Specialist',
+    info_agent: 'Medical Info Specialist',
+    history_agent: 'Patient History Specialist',
+    report_agent: 'Medical Records Specialist'
+  };
+  return map[name] || 'ApolloCare AI Assistant';
+}
+
 function updateAgent(agentName) {
   state.activeAgent = agentName;
-  if (activeAgentBadge) activeAgentBadge.textContent = agentName;
+  const friendlyName = agentLabel(agentName);
+  if (activeAgentBadge) activeAgentBadge.textContent = friendlyName;
 
   const colorMap = {
     hospital_root_agent: '#8b5cf6',
@@ -1521,7 +1811,7 @@ async function loadAdminDocuments() {
               <button class="btn-secondary toggle-content-btn" data-id="${doc.id}" style="padding:4px 8px; font-size:0.75rem">👁️ View Text</button>
               <button class="btn-secondary inspect-chunks-btn" data-id="${doc.id}" data-title="${escHtml(doc.title)}" style="padding:4px 8px; font-size:0.75rem">🔍 Inspect Chunks</button>
               <button class="btn-secondary edit-hdoc-btn" data-id="${doc.id}" data-title="${escHtml(doc.title)}" data-category="${escHtml(doc.category)}" data-content="${escHtml(doc.content || '')}" style="padding:4px 8px; font-size:0.75rem">✏️ Edit Title</button>
-              <button class="upload-remove delete-hdoc-btn" data-id="${doc.id}" title="Delete document & purge RAG chunks" style="padding:4px 8px; font-size:0.8rem">🗑️</button>
+              <button class="btn-secondary delete-hdoc-btn" data-id="${doc.id}" title="Delete document & purge RAG chunks" style="padding:4px 10px; font-size:0.75rem; background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.3); border-radius:6px; cursor:pointer; font-weight:600">🗑️ Delete</button>
             </div>
           </div>
           
@@ -1604,14 +1894,14 @@ async function loadAdminPatientsTable() {
 async function loadAdminAppointmentsTable() {
   const container = $('apptTableBody');
   if (!container) return;
-  container.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Loading appointments...</td></tr>';
+  container.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Loading appointments...</td></tr>';
   try {
     const headers = { 'Authorization': `Bearer ${state.currentUser.token}` };
     const res = await fetch('/api/admin/appointments', { headers });
     if (res.ok) {
       const data = await res.json();
       if (!data.appointments || data.appointments.length === 0) {
-        container.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">No appointments booked yet.</td></tr>';
+        container.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">No appointments booked yet.</td></tr>';
         return;
       }
       container.innerHTML = data.appointments.map(a => {
@@ -1629,12 +1919,73 @@ async function loadAdminAppointmentsTable() {
           <td>${escHtml(a.date)} at ${escHtml(a.time)}</td>
           <td><span style="background:${bg};color:${color};padding:2px 8px;border-radius:10px;font-size:0.75rem;font-weight:600">${escHtml(st)}</span></td>
           <td>${escHtml(a.notes || '—')}</td>
+          <td style="white-space:nowrap">
+            <div style="display:flex;gap:6px;align-items:center">
+              ${st !== 'completed' && st !== 'cancelled' ? `<button class="btn-primary admin-complete-appt-btn" data-id="${escHtml(a.id)}" style="padding:3px 8px;font-size:0.75rem;background:#10b981" title="Mark as completed">✔️ Complete</button>` : ''}
+              <button class="upload-remove admin-delete-appt-btn" data-id="${escHtml(a.id)}" title="Delete appointment record" style="padding:3px 7px;font-size:0.75rem">🗑️</button>
+            </div>
+          </td>
         </tr>
       `;}).join('');
 
+      container.querySelectorAll('.admin-complete-appt-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const apptId = btn.dataset.id;
+          btn.disabled = true;
+          btn.textContent = '⏳';
+          try {
+            const r = await fetch(`/api/admin/appointments/${apptId}/complete`, {
+              method: 'PATCH',
+              headers
+            });
+            if (r.ok) {
+              await loadAdminAppointmentsTable();
+              await loadAdminStats();
+              window.dispatchEvent(new CustomEvent('appointmentUpdated'));
+            } else {
+              alert('Failed to mark appointment as completed.');
+              btn.disabled = false;
+              btn.textContent = '✔️ Complete';
+            }
+          } catch (err) {
+            alert('Network error marking appointment complete.');
+            btn.disabled = false;
+            btn.textContent = '✔️ Complete';
+          }
+        });
+      });
+
+      container.querySelectorAll('.admin-delete-appt-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const apptId = btn.dataset.id;
+          if (confirm(`Permanently delete appointment record ${apptId}?`)) {
+            btn.disabled = true;
+            btn.textContent = '⏳';
+            try {
+              const r = await fetch(`/api/admin/appointments/${apptId}`, {
+                method: 'DELETE',
+                headers
+              });
+              if (r.ok) {
+                await loadAdminAppointmentsTable();
+                await loadAdminStats();
+                window.dispatchEvent(new CustomEvent('appointmentUpdated'));
+              } else {
+                alert('Failed to delete appointment.');
+                btn.disabled = false;
+                btn.textContent = '🗑️';
+              }
+            } catch (err) {
+              alert('Network error deleting appointment.');
+              btn.disabled = false;
+              btn.textContent = '🗑️';
+            }
+          }
+        });
+      });
     }
   } catch (err) {
-    container.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--danger)">Error loading appointments.</td></tr>';
+    container.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--danger)">Error loading appointments.</td></tr>';
   }
 }
 

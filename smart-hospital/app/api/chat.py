@@ -14,11 +14,34 @@ from app.api.admin import extract_text_from_file
 router = APIRouter(prefix="/chat", tags=["Conversational AI Assistant"])
 
 
+def clean_user_facing_reply(text: str) -> str:
+    """Clean up agent transfer preambles and internal agent names from user-facing replies."""
+    import re
+    if not text:
+        return ""
+    
+    # Remove transfer preambles like "I will transfer you to the info_agent.", "Transferring to appointment_agent."
+    text = re.sub(r"(?i)I will transfer you to the \w+[\._]?agent\.?", "", text)
+    text = re.sub(r"(?i)Transferring to \w+[\._]?agent\.?", "", text)
+    text = re.sub(r"(?i)I'm the hospital root agent\.?", "", text)
+    text = re.sub(r"(?i)Welcome to ApolloCare\.?", "", text)
+    
+    # Replace any leftover raw agent names
+    text = text.replace("info_agent", "ApolloCare Medical Specialist")
+    text = text.replace("appointment_agent", "ApolloCare Appointments Specialist")
+    text = text.replace("document_agent", "ApolloCare Records Specialist")
+    text = text.replace("history_agent", "ApolloCare History Specialist")
+    text = text.replace("hospital_root_agent", "ApolloCare AI Assistant")
+    text = text.replace("HOSPITAL_ROOT_AGENT", "ApolloCare AI Assistant")
+    
+    return text.strip()
+
+
 def extract_text_from_upload(file_bytes: bytes, filename: str) -> str:
     """Extract text from uploaded image or PDF/TXT document."""
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     
-    # If image file (PNG, JPG, JPEG, WEBP, GIF), attempt OCR / text extraction via PIL & fitz or LLM vision
+    # If image file (PNG, JPG, JPEG, WEBP, BMP, GIF), attempt OCR / text extraction via PIL & fitz or LLM vision
     if ext in ("png", "jpg", "jpeg", "webp", "bmp", "gif"):
         try:
             import fitz
@@ -26,6 +49,17 @@ def extract_text_from_upload(file_bytes: bytes, filename: str) -> str:
             text_parts = [page.get_text("text").strip() for page in doc if page.get_text("text").strip()]
             if text_parts:
                 return "\n".join(text_parts)
+        except Exception:
+            pass
+
+        try:
+            import io
+            from PIL import Image
+            import pytesseract
+            img = Image.open(io.BytesIO(file_bytes))
+            ocr_txt = pytesseract.image_to_string(img)
+            if ocr_txt and len(ocr_txt.strip()) > 5:
+                return ocr_txt.strip()
         except Exception:
             pass
 
@@ -38,30 +72,66 @@ def extract_text_from_upload(file_bytes: bytes, filename: str) -> str:
             mime_type = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
             data_url = f"data:{mime_type};base64,{b64_img}"
             
-            # Select vision-capable model
-            vision_model = cfg["model_name"]
-            if "llama-3.3" in vision_model or "instruct" in vision_model and "vision" not in vision_model:
-                if cfg.get("provider") == "openrouter":
-                    vision_model = "openrouter/google/gemini-2.5-flash"
-                else:
-                    vision_model = "gemini/gemini-2.5-flash"
+            provider = cfg.get("provider", "")
+            api_key = cfg.get("api_key", "")
+            
+            vision_candidates = []
+            if provider == "openrouter" or (api_key and api_key.startswith("sk-or-v1-")):
+                vision_candidates = [
+                    "openrouter/google/gemini-2.5-flash-lite",
+                    "openrouter/google/gemini-3.8-flash",
+                    "openrouter/qwen/qwen3.8-27b:free",
+                    "openrouter/inclusionai/ling-3.0-flash-vl:free"
+                ]
+            elif provider in ("gemini", "google") or (api_key and api_key.startswith("AIzaSy")):
+                vision_candidates = [
+                    "gemini/gemini-2.5-flash-lite",
+                    "gemini/gemini-2.5-flash",
+                    "gemini/gemini-1.5-flash"
+                ]
+            elif provider == "groq" or (api_key and api_key.startswith("gsk_")):
+                vision_candidates = [
+                    "groq/llama-3.2-11b-vision-preview",
+                    "groq/llama-3.2-90b-vision-preview"
+                ]
+            else:
+                curr_model = cfg.get("model_name", "")
+                vision_candidates = [curr_model, "openrouter/google/gemini-2.5-flash-lite"]
 
-            resp = completion(
-                model=vision_model,
-                api_key=cfg.get("api_key"),
-                api_base=cfg.get("api_base"),
-                max_tokens=1000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Extract and transcribe all text, medications, dosage, instructions, doctor details, and clinical notes from this prescription or medical document photo. Be thorough and accurate."},
-                        {"type": "image_url", "image_url": {"url": data_url}}
-                    ]
-                }]
-            )
-            extracted = resp.choices[0].message.content
-            if extracted and len(extracted.strip()) > 10:
-                return extracted.strip()
+            for model_to_try in vision_candidates:
+                try:
+                    resp = completion(
+                        model=model_to_try,
+                        api_key=api_key,
+                        api_base=cfg.get("api_base") or None,
+                        max_tokens=1500,
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Please carefully read and transcribe all details from this medical prescription or report image.\n"
+                                        "Extract and list:\n"
+                                        "1. Doctor / Clinic name and qualifications (if visible)\n"
+                                        "2. Patient name and date (if visible)\n"
+                                        "3. All Medicines / Drugs prescribed (brand or generic name, strength e.g., 500mg, form e.g., tablet/syrup)\n"
+                                        "4. Dosage & Frequency instructions (e.g., 1 tablet twice daily after meals)\n"
+                                        "5. Duration of treatment (e.g., 5 days)\n"
+                                        "6. Any additional advice, diagnosis, or clinical notes written.\n"
+                                        "Be accurate and transcribe exact text."
+                                    )
+                                },
+                                {"type": "image_url", "image_url": {"url": data_url}}
+                            ]
+                        }]
+                    )
+                    extracted = resp.choices[0].message.content
+                    if extracted and len(extracted.strip()) > 10:
+                        return extracted.strip()
+                except Exception as model_err:
+                    print(f"Vision model {model_to_try} error: {model_err}")
+                    continue
         except Exception as e:
             print("Vision extraction error:", e)
 
@@ -69,7 +139,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str) -> str:
     txt = extract_text_from_file(file_bytes, filename)
     if txt and txt.strip():
         return txt.strip()
-    return f"[Uploaded Document File: {filename}]"
+    return f"[Uploaded Prescription/Report Image: {filename}]\nPrescription details uploaded. Please analyze the prescription and explain the medications and dosage recommendations."
 
 
 @router.post("", response_model=ChatResponse)
@@ -149,6 +219,14 @@ async def chat_with_assistant(
                     trace_id=f"TRACE-{uuid.uuid4().hex[:8]}"
                 )
 
+    # Ensure each new query routes through root_agent unless actively in confirmation flow
+    if not is_confirmation:
+        try:
+            object.__setattr__(session, "active_agent", "hospital_root_agent")
+        except Exception:
+            pass
+        session.state["active_agent"] = "hospital_root_agent"
+
     # Format message for Google ADK
     content = types.Content(
         parts=[types.Part.from_text(text=payload.message)]
@@ -163,11 +241,9 @@ async def chat_with_assistant(
             session_id=session_id,
             new_message=content
         ):
-            # Inspect event author
             if hasattr(event, "author") and event.author:
                 active_agent = event.author
 
-            # Extract generated response text
             if hasattr(event, "content") and event.content:
                 for part in getattr(event.content, "parts", []):
                     if hasattr(part, "text") and part.text:
@@ -181,14 +257,16 @@ async def chat_with_assistant(
         )
 
     raw_reply = "".join(replies).strip()
-    if not raw_reply:
+    cleaned_reply = clean_user_facing_reply(raw_reply)
+
+    if not cleaned_reply:
         msg_lower = payload.message.lower().strip()
         if any(g in msg_lower for g in ("hi", "hello", "hey", "good morning", "good afternoon", "good evening", "greetings")):
             final_reply = "Hello! Welcome to ApolloCare. How can I assist you with your appointments, doctors, or medical documents today?"
         else:
-            final_reply = "I am here to assist you with your appointments, medical records, and hospital information. How can I help you today?"
+            final_reply = "I am here to assist you with your health, appointments, medical records, and hospital information. How can I help you today?"
     else:
-        final_reply = raw_reply
+        final_reply = cleaned_reply
 
     # Extract telemetry metrics
     tools_used = session.state.get("turn_tools_used", [])

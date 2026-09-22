@@ -77,6 +77,10 @@
           <span class="pulse"></span>
           <span id="systemStatusText">Multi-Agent Online</span>
         </div>
+        <button class="icon-btn" id="toggleReportsSidebarBtn" title="Toggle Stored Lab Reports & Records Panel" style="display:inline-flex; align-items:center; gap:6px; font-size:0.8rem; font-weight:600; padding:5px 10px; background:var(--bg-card-hover); border:1px solid var(--border-subtle); border-radius:var(--r-md); color:var(--text-primary); cursor:pointer;">
+          <span>📋 Lab Reports</span>
+          <span class="badge-pill" id="reportsCountBadge" style="background:var(--accent-color); color:#fff; font-size:0.7rem; padding:1px 6px; border-radius:10px; font-weight:700">0</span>
+        </button>
         <button class="icon-btn" id="themeToggleBtn" title="Toggle Cream / Dark Mode" style="font-size:1.1rem; padding:4px 8px;">🌙</button>
         <button class="icon-btn" id="clearChatBtn" title="Clear chat">&#128465;</button>
       </div>
@@ -151,6 +155,45 @@
       <p class="input-disclaimer">ApolloCare AI can make mistakes. Always verify medical information with a qualified professional.</p>
     </div>
   </main>
+
+  <!-- RIGHT SIDEBAR: STORED LAB REPORTS & MEDICAL RECORDS -->
+  <aside class="reports-sidebar" id="reportsSidebar">
+    <div class="reports-sidebar-header">
+      <div class="reports-header-title">
+        <span style="font-size:1.25rem">🧪</span>
+        <div>
+          <span class="reports-main-title">Lab Reports & Records</span>
+          <span class="reports-sub-title">Stored Patient Vault</span>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; gap:4px">
+        <button id="refreshReportsBtn" class="icon-btn" title="Refresh Lab Reports" style="font-size:0.85rem; padding:4px 6px">🔄</button>
+        <button id="closeReportsSidebarBtn" class="icon-btn" title="Hide Lab Reports Panel" style="font-size:0.9rem; padding:4px 6px">✕</button>
+      </div>
+    </div>
+
+    <!-- Filter Category Tabs -->
+    <div class="reports-filter-row" id="reportsFilterRow">
+      <button class="report-filter-btn active" data-filter="all">All (<span id="countFilterAll">0</span>)</button>
+      <button class="report-filter-btn" data-filter="laboratory_report">🧪 Labs (<span id="countFilterLab">0</span>)</button>
+      <button class="report-filter-btn" data-filter="prescription">💊 Prescription (<span id="countFilterRx">0</span>)</button>
+    </div>
+
+    <!-- Reports Scrollable List -->
+    <div class="reports-list-container" id="patientReportsList">
+      <div class="reports-loading-state" style="text-align:center; padding:24px; color:var(--text-muted); font-size:0.8rem">
+        <span>⏳ Loading your lab reports...</span>
+      </div>
+    </div>
+
+    <!-- Sidebar Footer Action (Hidden as files are uploaded directly via chat toolbar) -->
+    <div class="reports-sidebar-footer" style="display:none">
+      <button class="btn-primary" id="sidebarUploadReportBtn" style="width:100%; display:none">
+        <span>📤 Upload Lab Report / Rx</span>
+      </button>
+      <input type="file" id="sidebarReportFileInput" accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg" style="display:none">
+    </div>
+  </aside>
 
   <!-- DEDICATED FULL-SCREEN ADMIN OPERATIONS PORTAL -->
   <main class="admin-main" id="adminDashboardView" style="display:none; flex-direction:column; width:100%; height:100vh; background:var(--bg-main); overflow-y:auto">
@@ -269,7 +312,10 @@
 
         <!-- Content 3: Appointments Ledger -->
         <div id="adminSecAppts" style="display:none">
-          <h3 style="margin-top:0; margin-bottom:12px; color:var(--text-primary)">📅 Hospital Appointments Ledger</h3>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px">
+            <h3 style="margin:0; color:var(--text-primary)">📅 Hospital Appointments Ledger</h3>
+            <button id="adminRefreshApptsBtn" class="btn-primary" style="padding:6px 14px; font-size:0.8rem">🔄 Refresh Ledger</button>
+          </div>
           <div class="md-table-wrap">
             <table class="md-table" style="width:100%">
               <thead>
@@ -281,10 +327,11 @@
                   <th>Date & Time</th>
                   <th>Status</th>
                   <th>Notes</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody id="apptTableBody">
-                <tr><td colspan="7" style="text-align:center; color:var(--text-muted)">Loading appointments...</td></tr>
+                <tr><td colspan="8" style="text-align:center; color:var(--text-muted)">Loading appointments...</td></tr>
               </tbody>
             </table>
           </div>
@@ -412,6 +459,47 @@
             <button type="submit" class="btn-primary">💾 Save Changes</button>
           </div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- PATIENT DOCUMENT / LAB REPORT VIEWER MODAL -->
+  <div class="modal-overlay" id="docViewModal" style="display:none">
+    <div class="modal-box" style="max-width:680px; max-height:85vh; display:flex; flex-direction:column">
+      <div class="modal-header">
+        <div style="display:flex; align-items:center; gap:10px">
+          <span id="docModalIcon" style="font-size:1.4rem">📋</span>
+          <div>
+            <h3 id="docModalTitle" style="margin:0; font-size:1.05rem; color:var(--text-primary)">Document Details</h3>
+            <span id="docModalMeta" style="font-size:0.75rem; color:var(--text-muted)">Uploaded on 2026-09-08</span>
+          </div>
+        </div>
+        <button class="modal-close" id="closeDocViewModal">✕</button>
+      </div>
+
+      <div class="modal-body" style="overflow-y:auto; display:flex; flex-direction:column; gap:14px; padding:16px 20px">
+        <!-- Findings & Summary section -->
+        <div id="docModalSummaryBox" style="background:var(--bg-secondary); border:1px solid var(--border-subtle); border-radius:8px; padding:12px">
+          <div style="font-size:0.78rem; font-weight:700; color:var(--accent-color); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px">Clinical Summary & Findings</div>
+          <p id="docModalSummary" style="font-size:0.85rem; color:var(--text-primary); margin:0; line-height:1.4"></p>
+          <div id="docModalFindings" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:10px"></div>
+        </div>
+
+        <!-- Full Extracted Content section -->
+        <div style="display:flex; flex-direction:column; gap:6px">
+          <div style="font-size:0.78rem; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.5px">Extracted Document / Test Content</div>
+          <pre id="docModalContent" style="background:var(--bg-primary); border:1px solid var(--border-subtle); border-radius:8px; padding:14px; font-size:0.82rem; color:var(--text-primary); font-family:monospace; white-space:pre-wrap; max-height:240px; overflow-y:auto; line-height:1.45; margin:0"></pre>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="padding:12px 20px; border-top:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center; background:var(--bg-surface)">
+        <button class="btn-secondary" id="closeDocViewModal2">Close</button>
+        <div style="display:flex; gap:8px">
+          <button class="btn-secondary" id="deleteDocModalBtn" style="background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.3)">🗑️ Delete Document</button>
+          <button class="btn-primary" id="askAiDocBtn" style="display:flex; align-items:center; gap:6px">
+            <span>💬 Ask ApolloCare AI to Explain</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>

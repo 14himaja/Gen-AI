@@ -546,10 +546,10 @@ class Database:
 
     # --- Slots ---
 
-    def get_slots(self, doctor_id: Optional[str] = None, date_str: Optional[str] = None) -> List[AppointmentSlot]:
+    def get_slots(self, doctor_id: Optional[str] = None, date_str: Optional[str] = None, available_only: bool = False) -> List[AppointmentSlot]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            query = "SELECT * FROM slots WHERE is_available = 1"
+            query = "SELECT * FROM slots WHERE 1=1"
             params = []
             if doctor_id:
                 doc = self.get_doctor(doctor_id)
@@ -560,18 +560,33 @@ class Database:
                 query += " AND date = ?"
                 params.append(date_str)
             cursor.execute(query, params)
-            return [
-                AppointmentSlot(
-                    slot_id=r["slot_id"],
-                    doctor_id=r["doctor_id"],
-                    doctor_name=r["doctor_name"],
-                    department_name=r["department_name"],
-                    date=r["date"],
-                    time=r["time"],
-                    is_available=bool(r["is_available"])
+            slots_rows = cursor.fetchall()
+
+            # Cross-reference with active appointments in DB to guarantee accurate availability
+            cursor.execute(
+                "SELECT doctor_id, date, time FROM appointments WHERE status IN (?, ?)",
+                (AppointmentStatus.CONFIRMED.value, AppointmentStatus.SCHEDULED.value)
+            )
+            booked_set = {(r["doctor_id"], r["date"], r["time"]) for r in cursor.fetchall()}
+
+            result = []
+            for r in slots_rows:
+                is_booked = (r["doctor_id"], r["date"], r["time"]) in booked_set
+                is_avail = not is_booked
+                if available_only and not is_avail:
+                    continue
+                result.append(
+                    AppointmentSlot(
+                        slot_id=r["slot_id"],
+                        doctor_id=r["doctor_id"],
+                        doctor_name=r["doctor_name"],
+                        department_name=r["department_name"],
+                        date=r["date"],
+                        time=r["time"],
+                        is_available=is_avail
+                    )
                 )
-                for r in cursor.fetchall()
-            ]
+            return result
 
     # --- Appointments ---
 
@@ -643,9 +658,19 @@ class Database:
         actual_doctor_id = doc.id
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Mark slot unavailable if exists
+
+            # Prevent double booking: verify no active (confirmed/scheduled) appointment exists for this doctor, date, and time
             cursor.execute(
-                "UPDATE slots SET is_available = 0 WHERE doctor_id = ? AND date = ? AND time = ? AND is_available = 1",
+                "SELECT id FROM appointments WHERE doctor_id = ? AND date = ? AND time = ? AND status IN (?, ?)",
+                (actual_doctor_id, date_str, time_str, AppointmentStatus.CONFIRMED.value, AppointmentStatus.SCHEDULED.value)
+            )
+            if cursor.fetchone():
+                # Slot is already booked by another user!
+                return None
+
+            # Mark slot unavailable if exists in slots table
+            cursor.execute(
+                "UPDATE slots SET is_available = 0 WHERE doctor_id = ? AND date = ? AND time = ?",
                 (actual_doctor_id, date_str, time_str)
             )
 
@@ -697,15 +722,36 @@ class Database:
         self.log_audit(user_id=user_id, action="CANCEL_APPOINTMENT", details={"appointment_id": appt.id})
         return True
 
-    def delete_appointment_permanently(self, appointment_id: str, user_id: str) -> bool:
+    def delete_appointment_permanently(self, appointment_id: str, user_id: Optional[str] = None) -> bool:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM appointments WHERE id = ? AND user_id = ?", (appointment_id, user_id))
+            if user_id:
+                # Patient deletion: allow deleting if CANCELLED or COMPLETED
+                cursor.execute(
+                    "DELETE FROM appointments WHERE id = ? AND user_id = ? AND status IN (?, ?)",
+                    (appointment_id, user_id, AppointmentStatus.CANCELLED.value, AppointmentStatus.COMPLETED.value)
+                )
+            else:
+                # Admin deletion: can delete any appointment
+                cursor.execute("DELETE FROM appointments WHERE id = ?", (appointment_id,))
             conn.commit()
             deleted = cursor.rowcount > 0
         if deleted:
-            self.log_audit(user_id=user_id, action="PURGE_APPOINTMENT", details={"appointment_id": appointment_id})
+            self.log_audit(user_id=user_id or "ADMIN", action="PURGE_APPOINTMENT", details={"appointment_id": appointment_id})
         return deleted
+
+    def complete_appointment(self, appointment_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE appointments SET status = ? WHERE id = ?",
+                (AppointmentStatus.COMPLETED.value, appointment_id)
+            )
+            conn.commit()
+            updated = cursor.rowcount > 0
+        if updated:
+            self.log_audit(user_id="ADMIN", action="COMPLETE_APPOINTMENT", details={"appointment_id": appointment_id})
+        return updated
 
     def reschedule_appointment(self, user_id: str, appointment_id: str, new_date: str, new_time: str) -> Optional[Appointment]:
         appt = self.get_appointment(appointment_id)
@@ -788,9 +834,33 @@ class Database:
                 for r in cursor.fetchall()
             ]
 
-    def add_document(self, user_id: str, title: str, doc_type: DocumentType, extracted_text: str, summary: Optional[str] = None) -> MedicalDocument:
+    def add_document(self, user_id: str, title: str, doc_type: DocumentType, extracted_text: str, summary: Optional[str] = None, key_findings: Optional[List[str]] = None) -> MedicalDocument:
         doc_id = f"DOC-{uuid.uuid4().hex[:6].upper()}"
         today_str = date.today().isoformat()
+
+        # Generate summary if missing
+        if not summary:
+            clean_lines = [line.strip() for line in (extracted_text or "").split("\n") if line.strip() and not line.strip().startswith("#")]
+            if clean_lines:
+                summary = " ".join(clean_lines[:2])
+                if len(summary) > 200:
+                    summary = summary[:197] + "..."
+            else:
+                summary = f"{doc_type.value.replace('_', ' ').title()} uploaded on {today_str}."
+
+        # Extract key findings if missing
+        findings = list(key_findings or [])
+        if not findings and extracted_text:
+            lines = [l.strip() for l in extracted_text.split("\n") if l.strip()]
+            for line in lines:
+                lower = line.lower()
+                if any(kw in lower for kw in ("impression:", "diagnosis:", "result:", "test:", "detected", "elevated", "normal", "abnormal", "positive", "negative", "rx:", "tab", "capsule", "syrup", "dosage:")):
+                    clean = line.lstrip("-*•> ").strip()
+                    if clean and len(clean) <= 60 and clean not in findings:
+                        findings.append(clean)
+                if len(findings) >= 3:
+                    break
+
         doc = MedicalDocument(
             id=doc_id,
             user_id=user_id,
@@ -799,7 +869,7 @@ class Database:
             upload_date=today_str,
             extracted_text=extracted_text,
             summary=summary,
-            key_findings=[]
+            key_findings=findings
         )
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -820,6 +890,19 @@ class Database:
 
         self.log_audit(user_id=user_id, action="UPLOAD_DOCUMENT", details={"document_id": doc.id, "title": title})
         return doc
+
+    def delete_document(self, document_id: str, user_id: Optional[str] = None) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if user_id and user_id != "ADMIN":
+                cursor.execute("DELETE FROM documents WHERE id = ? AND user_id = ?", (document_id, user_id))
+            else:
+                cursor.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            self.log_audit(user_id=user_id or "UNKNOWN", action="DELETE_USER_DOCUMENT", details={"document_id": document_id})
+        return deleted
 
     # --- Admin Hospital Documents & Semantic Chunking ---
 

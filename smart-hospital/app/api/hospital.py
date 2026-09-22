@@ -40,10 +40,11 @@ async def get_doctor_by_id(doctor_id: str):
 @router.get("/slots", response_model=List[AppointmentSlot])
 async def get_available_slots(
     doctor_id: Optional[str] = Query(None, description="Filter by doctor ID"),
-    date: Optional[str] = Query(None, description="Filter by date (YYYY-MM-DD)")
+    date: Optional[str] = Query(None, description="Filter by date (YYYY-MM-DD)"),
+    available_only: bool = Query(False, description="Filter to only available slots")
 ):
-    """Check open appointment slots."""
-    return db.get_slots(doctor_id=doctor_id, date_str=date)
+    """Check appointment slots with availability status."""
+    return db.get_slots(doctor_id=doctor_id, date_str=date, available_only=available_only)
 
 
 # --- Appointments (Authorization Aware) ---
@@ -131,10 +132,10 @@ async def purge_appointment(
     appointment_id: str,
     current_user: Annotated[User, Depends(get_current_user)]
 ):
-    """Permanently delete a cancelled appointment record."""
+    """Permanently delete a cancelled or completed appointment record from history."""
     success = db.delete_appointment_permanently(appointment_id=appointment_id, user_id=current_user.user_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Appointment not found or not authorized.")
+        raise HTTPException(status_code=404, detail="Appointment not found or not eligible for deletion (only cancelled or completed appointments can be removed).")
     return {"status": "success", "message": f"Appointment {appointment_id} permanently deleted."}
 
 
@@ -174,6 +175,18 @@ async def upload_document(
         doc_type=doc_type,
         extracted_text=text_content
     )
+
+
+@router.delete("/documents/{document_id}", response_model=dict)
+async def delete_document(
+    document_id: str,
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """Delete a medical document (lab report or prescription) belonging to the user."""
+    success = db.delete_document(document_id=document_id, user_id=current_user.user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found or unauthorized.")
+    return {"status": "success", "message": f"Document {document_id} deleted."}
 
 
 # --- Audit Logs ---

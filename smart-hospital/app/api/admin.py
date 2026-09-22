@@ -310,3 +310,33 @@ async def list_all_hospital_appointments(admin: Annotated[User, Depends(require_
         "appointments": result
     }
 
+
+@router.delete("/appointments/{appointment_id}", response_model=dict)
+async def delete_appointment_admin(
+    appointment_id: str,
+    admin: Annotated[User, Depends(require_admin)]
+):
+    """Delete an appointment record from the admin portal."""
+    success = db.delete_appointment_permanently(appointment_id=appointment_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    return {
+        "status": "success",
+        "message": f"Appointment {appointment_id} permanently deleted by administrator."
+    }
+
+
+@router.patch("/appointments/{appointment_id}/complete", response_model=dict)
+async def mark_appointment_complete_admin(
+    appointment_id: str,
+    admin: Annotated[User, Depends(require_admin)]
+):
+    """Mark an appointment as completed from the admin portal."""
+    success = db.complete_appointment(appointment_id=appointment_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    return {
+        "status": "success",
+        "message": f"Appointment {appointment_id} marked as completed."
+    }
+

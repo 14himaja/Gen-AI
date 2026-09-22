@@ -46,7 +46,7 @@ def get_available_slots(doctor_id: str, date: str) -> Dict[str, Any]:
     """Get available appointment time slots for a given doctor on a specific date (YYYY-MM-DD)."""
     doc = db.get_doctor(doctor_id)
     actual_doc_id = doc.id if doc else doctor_id
-    slots = db.get_slots(doctor_id=actual_doc_id, date_str=date)
+    slots = db.get_slots(doctor_id=actual_doc_id, date_str=date, available_only=True)
     return {
         "status": "success",
         "doctor_id": actual_doc_id,
@@ -187,13 +187,18 @@ def reschedule_appointment(user_id: str, appointment_id: str, new_date: str, new
 
 
 def get_appointment_history(user_id: str) -> Dict[str, Any]:
-    """Retrieve appointment history strictly for the authenticated user."""
+    """Retrieve appointment records for the authenticated user, separating active scheduled appointments from past history."""
     appts = db.get_user_appointments(user_id=user_id)
+    
+    scheduled_appts = [a for a in appts if a.status.value in ("confirmed", "scheduled")]
+    past_appts = [a for a in appts if a.status.value in ("completed", "cancelled")]
+
     return {
         "status": "success",
         "user_id": user_id,
         "total_appointments": len(appts),
-        "appointments": [
+        "scheduled_appointments_count": len(scheduled_appts),
+        "scheduled_appointments": [
             {
                 "id": a.id,
                 "doctor": a.doctor_name,
@@ -203,7 +208,19 @@ def get_appointment_history(user_id: str) -> Dict[str, Any]:
                 "status": a.status.value,
                 "notes": a.notes
             }
-            for a in sorted(appts, key=lambda x: x.date, reverse=True)
+            for a in sorted(scheduled_appts, key=lambda x: (x.date, x.time))
+        ],
+        "past_history_appointments": [
+            {
+                "id": a.id,
+                "doctor": a.doctor_name,
+                "department": a.department_name,
+                "date": a.date,
+                "time": a.time,
+                "status": a.status.value,
+                "notes": a.notes
+            }
+            for a in sorted(past_appts, key=lambda x: x.date, reverse=True)
         ]
     }
 
