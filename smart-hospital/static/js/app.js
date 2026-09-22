@@ -336,6 +336,83 @@ function setupEventListeners() {
     });
   }
 
+  // Admin Clean Duplicates Button
+  const adminCleanDocsBtn = $('adminCleanDocsBtn');
+  if (adminCleanDocsBtn) {
+    adminCleanDocsBtn.addEventListener('click', async () => {
+      if (!confirm('Clean duplicate test documents in database?')) return;
+      try {
+        const headers = { 'Authorization': `Bearer ${state.currentUser.token}` };
+        const res = await fetch('/api/admin/documents', { headers });
+        if (res.ok) {
+          const data = await res.json();
+          const seen = new Set();
+          for (const doc of data.documents) {
+            if (seen.has(doc.title)) {
+              await fetch(`/api/admin/documents/${doc.id}`, { method: 'DELETE', headers });
+            } else {
+              seen.add(doc.title);
+            }
+          }
+          await loadAdminStats();
+          await loadAdminDocuments();
+          alert('✓ Duplicate test documents cleaned successfully.');
+        }
+      } catch (err) {
+        alert('Failed to clean duplicate documents.');
+      }
+    });
+  }
+
+  // Edit Document Modal Listeners
+  const editDocModal = $('editDocModal');
+  const closeEditDocModal = $('closeEditDocModal');
+  const cancelEditDocBtn = $('cancelEditDocBtn');
+  const editDocForm = $('editDocForm');
+
+  if (closeEditDocModal) closeEditDocModal.addEventListener('click', () => hideModal(editDocModal));
+  if (cancelEditDocBtn) cancelEditDocBtn.addEventListener('click', () => hideModal(editDocModal));
+  if (editDocModal) editDocModal.addEventListener('click', e => { if (e.target === editDocModal) hideModal(editDocModal); });
+
+  if (editDocForm) {
+    editDocForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const docId = $('editDocId').value;
+      const title = $('editDocTitleInput').value.trim();
+      const category = $('editDocCategoryInput').value.trim();
+      const content = $('editDocContentInput').value.trim();
+
+      if (!docId || !title) {
+        alert('Please provide a document title.');
+        return;
+      }
+
+      try {
+        const headers = {
+          'Authorization': `Bearer ${state.currentUser.token}`,
+          'Content-Type': 'application/json'
+        };
+        const res = await fetch(`/api/admin/documents/${docId}`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ title, category, content })
+        });
+
+        if (res.ok) {
+          hideModal(editDocModal);
+          alert('✓ Document title & details updated successfully!');
+          await loadAdminStats();
+          await loadAdminDocuments();
+        } else {
+          const err = await res.json();
+          alert(`Update failed: ${err.detail || 'Error updating document'}`);
+        }
+      } catch (err) {
+        alert('Connection error updating document.');
+      }
+    });
+  }
+
   // Doc modal
   if (closeDocViewModal) closeDocViewModal.addEventListener('click', () => hideModal(docViewModal));
   if (closeDocViewModal2) closeDocViewModal2.addEventListener('click', () => hideModal(docViewModal));
@@ -1335,27 +1412,66 @@ async function loadAdminDocuments() {
         return;
       }
 
-      container.innerHTML = data.documents.map(doc => `
-        <div style="display:flex;justify-content:space-between;align-items:center;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">
-          <div>
-            <div style="font-weight:600;font-size:0.9rem">${escHtml(doc.title)}</div>
-            <div style="font-size:0.75rem;color:var(--text-muted)">Category: ${escHtml(doc.category)} · Date: ${escHtml(doc.upload_date)}</div>
+      container.innerHTML = data.documents.map(doc => {
+        const fileType = doc.file_type || 'Direct Text Input';
+        const isPdf = fileType.toLowerCase().includes('pdf');
+        return `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border-subtle); padding:14px; border-radius:8px; display:flex; flex-direction:column; gap:8px">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px">
+            <div>
+              <div style="font-weight:700; font-size:0.95rem; color:var(--text-primary); display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+                <span>${escHtml(doc.title)}</span>
+                <span style="font-size:0.72rem; padding:2px 8px; border-radius:10px; font-weight:600; background:${isPdf ? 'rgba(59,130,246,0.15)' : 'rgba(16,185,129,0.15)'}; color:${isPdf ? '#3b82f6' : '#10b981'}">
+                  ${isPdf ? '📄 PDF Document' : '✍️ Text Input'}
+                </span>
+              </div>
+              <div style="font-size:0.78rem; color:var(--text-muted); margin-top:4px">
+                Category: <strong style="color:var(--text-secondary)">${escHtml(doc.category)}</strong> · Uploaded: ${escHtml(doc.upload_date)} · Format: ${escHtml(fileType)}
+              </div>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+              <span style="background:var(--accent-color); color:#fff; padding:3px 9px; border-radius:12px; font-size:0.75rem; font-weight:600">🧩 ${doc.chunk_count} Chunks</span>
+              <button class="btn-secondary toggle-content-btn" data-id="${doc.id}" style="padding:4px 8px; font-size:0.75rem">👁️ View Text</button>
+              <button class="btn-secondary inspect-chunks-btn" data-id="${doc.id}" data-title="${escHtml(doc.title)}" style="padding:4px 8px; font-size:0.75rem">🔍 Inspect Chunks</button>
+              <button class="btn-secondary edit-hdoc-btn" data-id="${doc.id}" data-title="${escHtml(doc.title)}" data-category="${escHtml(doc.category)}" data-content="${escHtml(doc.content || '')}" style="padding:4px 8px; font-size:0.75rem">✏️ Edit Title</button>
+              <button class="upload-remove delete-hdoc-btn" data-id="${doc.id}" title="Delete document & purge RAG chunks" style="padding:4px 8px; font-size:0.8rem">🗑️</button>
+            </div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span style="background:var(--accent-color);color:#fff;padding:2px 8px;border-radius:12px;font-size:0.75rem;font-weight:600">🧩 ${doc.chunk_count} Chunks</span>
-            <button class="btn-secondary inspect-chunks-btn" data-id="${doc.id}" data-title="${escHtml(doc.title)}" style="padding:4px 8px;font-size:0.75rem">Inspect Chunks</button>
-            <button class="upload-remove delete-hdoc-btn" data-id="${doc.id}">✕</button>
+          
+          <div id="docContentPreview-${doc.id}" style="display:none; background:var(--bg-primary); border:1px solid var(--border-subtle); border-radius:6px; padding:10px 12px; font-size:0.8rem; color:var(--text-secondary); max-height:200px; overflow-y:auto; white-space:pre-wrap; margin-top:4px">
+${escHtml(doc.content || 'No text content available.')}
           </div>
         </div>
-      `).join('');
+      `}).join('');
+
+      container.querySelectorAll('.toggle-content-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const preview = $(`docContentPreview-${btn.dataset.id}`);
+          if (preview) {
+            const isHidden = preview.style.display === 'none';
+            preview.style.display = isHidden ? 'block' : 'none';
+            btn.textContent = isHidden ? '🙈 Hide Text' : '👁️ View Text';
+          }
+        });
+      });
 
       container.querySelectorAll('.inspect-chunks-btn').forEach(btn => {
         btn.addEventListener('click', () => inspectDocumentChunks(btn.dataset.id, btn.dataset.title));
       });
 
+      container.querySelectorAll('.edit-hdoc-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          $('editDocId').value = btn.dataset.id;
+          $('editDocTitleInput').value = btn.dataset.title;
+          $('editDocCategoryInput').value = btn.dataset.category || 'General Guidelines';
+          $('editDocContentInput').value = btn.dataset.content || '';
+          showModal($('editDocModal'));
+        });
+      });
+
       container.querySelectorAll('.delete-hdoc-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
-          if (confirm('Delete this hospital document and remove its chunks?')) {
+          if (confirm('Delete this hospital document and permanently remove its chunks from User RAG search index?')) {
             const headers = { 'Authorization': `Bearer ${state.currentUser.token}` };
             await fetch(`/api/admin/documents/${btn.dataset.id}`, { method: 'DELETE', headers });
             await loadAdminStats();

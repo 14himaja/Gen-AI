@@ -115,3 +115,65 @@ async def test_admin_upload_chunk_and_rag_search(admin_headers):
         # 4. Clean up test document
         del_resp = await client.delete(f"/api/admin/documents/{doc_id}", headers=admin_headers)
         assert del_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_file_upload_endpoint(admin_headers):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Test text file upload via multipart/form-data
+        file_bytes = b"ApolloCare Hospital General Safety Policy.\nAll medical staff must wear non-slip shoes in operating areas."
+        files = {
+            "file": ("safety_policy.txt", file_bytes, "text/plain")
+        }
+        data = {
+            "title": "",
+            "category": "Safety Guidelines",
+            "content": ""
+        }
+
+        resp = await client.post("/api/admin/documents/upload", data=data, files=files, headers=admin_headers)
+        assert resp.status_code == 201
+        res_data = resp.json()
+        assert res_data["status"] == "success"
+        assert res_data["document"]["title"] == "safety policy"
+        assert res_data["document"]["chunk_count"] >= 1
+
+        doc_id = res_data["document"]["id"]
+
+        # Clean up
+        await client.delete(f"/api/admin/documents/{doc_id}", headers=admin_headers)
+
+
+@pytest.mark.asyncio
+async def test_admin_update_document_title(admin_headers):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create doc
+        create_resp = await client.post("/api/admin/documents", json={
+            "title": "Initial Document Title",
+            "category": "Test Policy",
+            "content": "Initial policy text for hospital."
+        }, headers=admin_headers)
+        assert create_resp.status_code == 201
+        doc_id = create_resp.json()["document"]["id"]
+
+        # Update title
+        update_resp = await client.put(f"/api/admin/documents/{doc_id}", json={
+            "title": "Updated Official Hospital Title",
+            "category": "Updated Policy"
+        }, headers=admin_headers)
+        assert update_resp.status_code == 200
+        up_data = update_resp.json()
+        assert up_data["document"]["title"] == "Updated Official Hospital Title"
+
+        # Verify chunk title updated
+        chunks_resp = await client.get(f"/api/admin/documents/{doc_id}/chunks", headers=admin_headers)
+        assert chunks_resp.status_code == 200
+        first_chunk = chunks_resp.json()["chunks"][0]
+        assert "Updated Official Hospital Title" in first_chunk["chunk_title"]
+
+        # Clean up
+        await client.delete(f"/api/admin/documents/{doc_id}", headers=admin_headers)
+
+

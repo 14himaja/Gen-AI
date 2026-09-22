@@ -29,6 +29,12 @@ class AdminDocumentCreate(BaseModel):
     content: Optional[str] = ""
 
 
+class AdminDocumentUpdate(BaseModel):
+    title: Optional[str] = None
+    category: Optional[str] = None
+    content: Optional[str] = None
+
+
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     """Extract clean text content from uploaded PDF, TXT, or document file."""
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
@@ -54,13 +60,14 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
                     t = page.extract_text()
                     if t and t.strip():
                         text_parts.append(t.strip())
-                if text_parts:
-                    return "\n\n".join(text_parts)
+            if text_parts:
+                return "\n\n".join(text_parts)
         except Exception:
             pass
 
+    # Fallback to UTF-8 text parsing
     try:
-        return file_bytes.decode("utf-8", errors="ignore").strip()
+        return file_bytes.decode("utf-8", errors="ignore")
     except Exception:
         return ""
 
@@ -90,31 +97,30 @@ async def admin_login(payload: UserLogin):
 
 
 @router.post("/documents", response_model=dict, status_code=status.HTTP_201_CREATED)
-async def upload_hospital_document(
-    payload: AdminDocumentCreate,
+async def create_hospital_document(
+    doc: AdminDocumentCreate,
     admin: Annotated[User, Depends(require_admin)]
 ):
     """
-    Upload a new hospital policy / medical guideline document via JSON.
-    The backend automatically applies semantic text chunking (300-500 char sliding window)
-    and indexes the chunks for multi-source RAG search.
+    Upload a new raw hospital policy/guideline document.
+    Automatically splits into semantic RAG chunks.
     """
-    title = payload.title.strip() if payload.title else "Untitled Document"
-    content = payload.content.strip() if payload.content else ""
-
-    if not content:
+    if not doc.title or not doc.title.strip():
+        raise HTTPException(status_code=400, detail="Document title is required.")
+    if not doc.content or not doc.content.strip():
         raise HTTPException(status_code=400, detail="Document content cannot be empty.")
 
     result = db.add_hospital_document(
-        title=title,
-        category=payload.category or "General Guidelines",
+        title=doc.title.strip(),
+        category=doc.category.strip() if doc.category else "General Guidelines",
         uploaded_by=admin.user_id,
-        content=content
+        content=doc.content.strip(),
+        file_type="Direct Text Input"
     )
 
     return {
         "status": "success",
-        "message": f"Hospital document '{title}' uploaded and split into {result['chunk_count']} RAG chunks.",
+        "message": f"Hospital document '{doc.title}' uploaded and split into {result['chunk_count']} RAG chunks.",
         "document": result
     }
 
@@ -133,8 +139,13 @@ async def upload_hospital_document_file(
     """
     extracted_text = ""
     file_title = title.strip() if title and title.strip() else ""
+    file_type = "Direct Text Input"
 
     if file:
+        if file.filename.lower().endswith(".pdf"):
+            file_type = f"PDF Document ({file.filename})"
+        else:
+            file_type = f"Text Document ({file.filename})"
         if not file_title:
             file_title = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
         file_bytes = await file.read()
@@ -151,13 +162,38 @@ async def upload_hospital_document_file(
         title=final_title,
         category=final_category,
         uploaded_by=admin.user_id,
-        content=final_content
+        content=final_content,
+        file_type=file_type
     )
 
     return {
         "status": "success",
         "message": f"Hospital document '{final_title}' uploaded and split into {result['chunk_count']} RAG chunks.",
         "document": result
+    }
+
+
+@router.put("/documents/{doc_id}", response_model=dict)
+async def update_hospital_document(
+    doc_id: str,
+    body: AdminDocumentUpdate,
+    admin: Annotated[User, Depends(require_admin)]
+):
+    """Update document title, category, or content in DB and update chunk index."""
+    updated_doc = db.update_hospital_document(
+        doc_id=doc_id,
+        title=body.title,
+        category=body.category,
+        content=body.content,
+        user_id=admin.user_id
+    )
+    if not updated_doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    return {
+        "status": "success",
+        "message": f"Document '{updated_doc['title']}' updated successfully.",
+        "document": updated_doc
     }
 
 

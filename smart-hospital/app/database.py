@@ -232,9 +232,14 @@ class Database:
                     category TEXT NOT NULL,
                     uploaded_by TEXT NOT NULL,
                     upload_date TEXT NOT NULL,
-                    content TEXT NOT NULL
+                    content TEXT NOT NULL,
+                    file_type TEXT DEFAULT 'Direct Text'
                 )
             """)
+            try:
+                cursor.execute("ALTER TABLE hospital_documents ADD COLUMN file_type TEXT DEFAULT 'Direct Text'")
+            except Exception:
+                pass
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS hospital_doc_chunks (
                     chunk_id TEXT PRIMARY KEY,
@@ -795,7 +800,14 @@ class Database:
 
     # --- Admin Hospital Documents & Semantic Chunking ---
 
-    def add_hospital_document(self, title: str, category: str, uploaded_by: str, content: str) -> Dict[str, Any]:
+    def add_hospital_document(
+        self,
+        title: str,
+        category: str,
+        uploaded_by: str,
+        content: str,
+        file_type: str = "Direct Text"
+    ) -> Dict[str, Any]:
         doc_id = f"HDOC-{uuid.uuid4().hex[:6].upper()}"
         today_str = date.today().isoformat()
         
@@ -820,8 +832,8 @@ class Database:
             cursor = conn.cursor()
             # Save parent document
             cursor.execute(
-                "INSERT INTO hospital_documents VALUES (?, ?, ?, ?, ?, ?)",
-                (doc_id, title, category, uploaded_by, today_str, content)
+                "INSERT INTO hospital_documents VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (doc_id, title, category, uploaded_by, today_str, content, file_type)
             )
             # Save chunks
             cursor.executemany(
@@ -830,7 +842,7 @@ class Database:
             )
             conn.commit()
 
-        self.log_audit(user_id=uploaded_by, action="ADMIN_UPLOAD_HOSPITAL_DOC", details={"doc_id": doc_id, "title": title, "chunk_count": len(chunks)})
+        self.log_audit(user_id=uploaded_by, action="ADMIN_UPLOAD_HOSPITAL_DOC", details={"doc_id": doc_id, "title": title, "file_type": file_type, "chunk_count": len(chunks)})
         
         return {
             "id": doc_id,
@@ -838,6 +850,7 @@ class Database:
             "category": category,
             "uploaded_by": uploaded_by,
             "upload_date": today_str,
+            "file_type": file_type,
             "chunk_count": len(chunks),
             "chunks": chunks
         }
@@ -847,6 +860,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT d.id, d.title, d.category, d.uploaded_by, d.upload_date, d.content,
+                       COALESCE(d.file_type, 'Direct Text') as file_type,
                        COUNT(c.chunk_id) as chunk_count
                 FROM hospital_documents d
                 LEFT JOIN hospital_doc_chunks c ON d.id = c.doc_id
@@ -862,10 +876,59 @@ class Database:
                     "uploaded_by": r["uploaded_by"],
                     "upload_date": r["upload_date"],
                     "content": r["content"],
+                    "file_type": r["file_type"],
                     "chunk_count": r["chunk_count"]
                 }
                 for r in rows
             ]
+
+    def update_hospital_document(
+        self,
+        doc_id: str,
+        title: Optional[str] = None,
+        category: Optional[str] = None,
+        content: Optional[str] = None,
+        user_id: str = "A4001"
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM hospital_documents WHERE id = ?", (doc_id,))
+            doc_row = cursor.fetchone()
+            if not doc_row:
+                return None
+
+            new_title = title.strip() if title and title.strip() else doc_row["title"]
+            new_category = category.strip() if category and category.strip() else doc_row["category"]
+            new_content = content.strip() if content and content.strip() else doc_row["content"]
+
+            cursor.execute(
+                "UPDATE hospital_documents SET title = ?, category = ?, content = ? WHERE id = ?",
+                (new_title, new_category, new_content, doc_id)
+            )
+
+            # If content changed, re-chunk document
+            if content and content.strip() and content.strip() != doc_row["content"]:
+                cursor.execute("DELETE FROM hospital_doc_chunks WHERE doc_id = ?", (doc_id,))
+                chunks = chunk_text(new_content, chunk_size=400, overlap=80)
+                now_str = datetime.utcnow().isoformat()
+                chunk_rows = [
+                    (f"CHUNK-{doc_id}-{c['chunk_index']}", doc_id, c["chunk_index"], c["chunk_title"], c["chunk_text"], c["word_count"], now_str)
+                    for c in chunks
+                ]
+                cursor.executemany("INSERT INTO hospital_doc_chunks VALUES (?, ?, ?, ?, ?, ?, ?)", chunk_rows)
+            elif title and title.strip() and title.strip() != doc_row["title"]:
+                # If title changed, update chunk titles in chunk index
+                cursor.execute("SELECT chunk_id, chunk_index FROM hospital_doc_chunks WHERE doc_id = ?", (doc_id,))
+                existing_chunks = cursor.fetchall()
+                for chk in existing_chunks:
+                    updated_chunk_title = f"{new_title} (Chunk {chk['chunk_index'] + 1})"
+                    cursor.execute("UPDATE hospital_doc_chunks SET chunk_title = ? WHERE chunk_id = ?", (updated_chunk_title, chk["chunk_id"]))
+
+            conn.commit()
+
+        self.log_audit(user_id=user_id, action="ADMIN_UPDATE_HOSPITAL_DOC", details={"doc_id": doc_id, "title": new_title})
+        docs = [d for d in self.get_hospital_documents() if d["id"] == doc_id]
+        return docs[0] if docs else None
 
     def get_hospital_doc_chunks(self, doc_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
