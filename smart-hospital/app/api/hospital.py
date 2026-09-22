@@ -126,6 +126,18 @@ async def cancel_appointment(
     return {"status": "success", "message": f"Appointment {appointment_id} cancelled."}
 
 
+@router.delete("/appointments/{appointment_id}/purge", response_model=dict)
+async def purge_appointment(
+    appointment_id: str,
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """Permanently delete a cancelled appointment record."""
+    success = db.delete_appointment_permanently(appointment_id=appointment_id, user_id=current_user.user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Appointment not found or not authorized.")
+    return {"status": "success", "message": f"Appointment {appointment_id} permanently deleted."}
+
+
 # --- Documents ---
 
 @router.get("/documents", response_model=List[MedicalDocument])

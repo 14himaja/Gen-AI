@@ -25,13 +25,26 @@ def _sanitize_messages(messages):
                 except Exception:
                     pass
 
+import asyncio
+import time
+
 _orig_acompletion = litellm.acompletion
 async def _safe_acompletion(*args, **kwargs):
     if "messages" in kwargs:
         _sanitize_messages(kwargs["messages"])
     elif len(args) > 1:
         _sanitize_messages(args[1])
-    return await _orig_acompletion(*args, **kwargs)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return await _orig_acompletion(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e).lower()
+            if attempt < max_retries - 1 and any(token in err_str for token in ("429", "rate limit", "ratelimit", "retry shortly")):
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise e
 
 litellm.acompletion = _safe_acompletion
 
@@ -41,7 +54,17 @@ def _safe_completion(*args, **kwargs):
         _sanitize_messages(kwargs["messages"])
     elif len(args) > 1:
         _sanitize_messages(args[1])
-    return _orig_completion(*args, **kwargs)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return _orig_completion(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e).lower()
+            if attempt < max_retries - 1 and any(token in err_str for token in ("429", "rate limit", "ratelimit", "retry shortly")):
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise e
 
 litellm.completion = _safe_completion
 

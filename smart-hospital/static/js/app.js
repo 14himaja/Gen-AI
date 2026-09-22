@@ -186,6 +186,9 @@ function setupEventListeners() {
   if (slotPickerBtn) slotPickerBtn.addEventListener('click', () => toggleSlotPanel());
   if (closeSlotPanel) closeSlotPanel.addEventListener('click', () => toggleSlotPanel(false));
 
+  const refreshAppointmentsBtn = $('refreshAppointmentsBtn');
+  if (refreshAppointmentsBtn) refreshAppointmentsBtn.addEventListener('click', () => loadUserAppointmentsSidebar());
+
   // File upload
   if (attachBtn) attachBtn.addEventListener('click', () => fileInput.click());
   if (fileInput) fileInput.addEventListener('change', handleFileSelect);
@@ -460,7 +463,12 @@ async function switchToPatientMode(patientId = 'P1001') {
   if (sidebar) sidebar.style.display = 'flex';
   if (chatMain) chatMain.style.display = 'flex';
 
-  await authenticatePatient(patientId);
+  // If currently authenticated as Admin or missing patient token, switch to requested patient account
+  if (!state.currentUser.token || state.currentUser.role === 'admin' || state.currentUser.user_id === 'A4001') {
+    await authenticatePatient(patientId);
+  } else {
+    updatePatientUI();
+  }
 }
 
 async function switchToAdminMode() {
@@ -689,6 +697,62 @@ async function authenticatePatient(patientId) {
   }
 }
 
+async function loadUserAppointmentsSidebar() {
+  const container = $('userAppointmentsList');
+  if (!container) return;
+  try {
+    const headers = state.currentUser && state.currentUser.token ? { 'Authorization': `Bearer ${state.currentUser.token}` } : {};
+    const res = await fetch('/api/hospital/appointments', { headers });
+    if (res.ok) {
+      const appts = await res.json();
+      if (!appts || appts.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-muted); padding:6px 4px; font-size:0.75rem">No booked appointments yet.</div>';
+        return;
+      }
+      container.innerHTML = appts.map(a => {
+        const st = (a.status || '').toLowerCase();
+        let color = '#10b981';
+        let deleteBtn = '';
+        if (st === 'cancelled') {
+          color = '#ef4444';
+          deleteBtn = `<button class="purge-appt-btn" data-id="${escHtml(a.id)}" title="Delete cancelled appointment record" style="background:none; border:none; color:var(--danger); cursor:pointer; font-size:0.8rem; padding:0 2px; margin-left:4px">🗑️</button>`;
+        }
+        return `
+          <div style="background:var(--bg-secondary); border:1px solid var(--border-subtle); border-radius:6px; padding:6px 8px; font-size:0.75rem">
+            <div style="font-weight:700; color:var(--text-primary); display:flex; justify-content:space-between; align-items:center">
+              <span>👨‍⚕️ ${escHtml(a.doctor_name)}</span>
+              <div style="display:flex; align-items:center; gap:2px">
+                <span style="color:${color}; font-weight:600">${escHtml(st)}</span>
+                ${deleteBtn}
+              </div>
+            </div>
+            <div style="color:var(--text-muted); font-size:0.7rem; margin-top:2px">
+              🏥 ${escHtml(a.department_name || a.department || 'General')} · 📅 ${escHtml(a.date)} ${escHtml(a.time)}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      container.querySelectorAll('.purge-appt-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (confirm('Delete this cancelled appointment record from your history?')) {
+            try {
+              const headers = state.currentUser && state.currentUser.token ? { 'Authorization': `Bearer ${state.currentUser.token}` } : {};
+              await fetch(`/api/hospital/appointments/${btn.dataset.id}/purge`, { method: 'DELETE', headers });
+              await loadUserAppointmentsSidebar();
+            } catch (err) {
+              alert('Failed to delete appointment record.');
+            }
+          }
+        });
+      });
+    }
+  } catch (err) {
+    container.innerHTML = '<div style="color:var(--danger); padding:4px; font-size:0.75rem">Error loading appointments.</div>';
+  }
+}
+
 function updatePatientUI() {
   const u = state.currentUser;
   if (patientNameDisplay) patientNameDisplay.textContent = u.name;
@@ -696,6 +760,7 @@ function updatePatientUI() {
   if (patientAvatarSidebar) patientAvatarSidebar.textContent = u.name ? u.name.split(' ').map(n => n[0]).join('').substring(0,2) : 'U';
 
   loadConversations();
+  loadUserAppointmentsSidebar();
 }
 
 async function handleLogin(e) {
@@ -953,16 +1018,21 @@ function handleFileSelect(e) {
 function renderFilePreview(file) {
   const div = document.createElement('div');
   div.className = 'upload-preview-item';
+  div.style.cssText = 'display:inline-flex; align-items:center; gap:6px; background:var(--bg-card-hover); border:1px solid var(--border-subtle); border-radius:16px; padding:4px 10px 4px 6px; font-size:0.78rem; color:var(--text-primary); margin:2px 4px;';
 
   const isImg = file.type.startsWith('image/');
-  let thumb = '📄';
-  if (isImg) thumb = '🖼️';
-  else if (file.name.endsWith('.pdf')) thumb = '📜';
+  let thumbHtml = '<span style="font-size:0.9rem">📄</span>';
+  if (isImg) {
+    const imgUrl = URL.createObjectURL(file);
+    thumbHtml = `<img src="${imgUrl}" style="width:26px; height:26px; border-radius:4px; object-fit:cover; border:1px solid var(--border-subtle)">`;
+  } else if (file.name.endsWith('.pdf')) {
+    thumbHtml = '<span style="font-size:0.9rem">📜</span>';
+  }
 
   div.innerHTML = `
-    <span>${thumb}</span>
-    <span class="upload-name">${escHtml(file.name)}</span>
-    <button class="upload-remove" title="Remove file">✕</button>
+    ${thumbHtml}
+    <span class="upload-name" style="max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${escHtml(file.name)}</span>
+    <button class="upload-remove" title="Remove file" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.85rem; padding:0 2px; margin-left:4px">✕</button>
   `;
 
   div.querySelector('.upload-remove').addEventListener('click', () => {
@@ -1085,8 +1155,25 @@ async function sendToBackend(prompt, files = []) {
       const data = await res.json();
       updateAgent(data.active_agent || 'hospital_root_agent');
 
-      const responseText = data.reply || data.response || "I have processed your request.";
+      const responseText = data.reply || data.response || "I am here to assist you. How can I help you today?";
       appendAiMessage(responseText, data.active_agent, data.route, data.requires_confirmation, data.confirmation_details);
+
+      // Refresh appointments sidebar in case an appointment was booked/cancelled
+      loadUserAppointmentsSidebar();
+
+      // Auto-open slot picker ONLY when explicitly asking about appointment slots or booking
+      const lowerPrompt = prompt.toLowerCase();
+      const lowerReply = responseText.toLowerCase();
+      const slotTriggerPatterns = [
+        /appointment.*slot/i, /slot.*appointment/i, /available.*slot/i, /slot.*available/i,
+        /book.*appoint/i, /appoint.*book/i, /available.*appointment/i, /appointment.*available/i,
+        /show.*slot/i, /book.*slot/i, /open.*slot/i, /find.*slot/i
+      ];
+      const promptWantsSlots = slotTriggerPatterns.some(p => p.test(lowerPrompt));
+      const replyMentionsSlots = /available.*slot|slot.*available|pick.*slot|select.*slot|slot.*picker/i.test(lowerReply);
+      if (promptWantsSlots || replyMentionsSlots) {
+        toggleSlotPanel(true);
+      }
     } else {
       const err = await res.json();
       appendAiMessage(`⚠️ Error: ${err.detail || 'Unable to process request.'}`, 'hospital_root_agent');
@@ -1536,7 +1623,7 @@ async function loadAdminAppointmentsTable() {
         return `
         <tr>
           <td><code style="color:var(--accent-color)">${escHtml(a.id)}</code></td>
-          <td>${escHtml(a.user_id || a.patient_id)}</td>
+          <td><strong>${escHtml(a.patient_name || a.user_id)}</strong> <br><small style="color:var(--text-muted)">(${escHtml(a.user_id)})</small></td>
           <td><strong>${escHtml(a.doctor_name)}</strong></td>
           <td>${escHtml(a.department_name || a.department)}</td>
           <td>${escHtml(a.date)} at ${escHtml(a.time)}</td>

@@ -87,7 +87,15 @@ async def terminal_chat(user_id: str):
                         if hasattr(part, "text") and part.text:
                             replies.append(part.text)
 
-            full_reply = "".join(replies).strip() or "I have processed your request."
+            raw_reply = "".join(replies).strip()
+            if not raw_reply:
+                msg_lower = user_msg.lower().strip()
+                if any(g in msg_lower for g in ("hi", "hello", "hey", "good morning", "good afternoon", "good evening", "greetings")):
+                    full_reply = "Hello! Welcome to ApolloCare. How can I assist you with your appointments, doctors, or medical documents today?"
+                else:
+                    full_reply = "I am here to assist you with your appointments, medical records, and hospital information. How can I help you today?"
+            else:
+                full_reply = raw_reply
             print(full_reply)
 
         except KeyboardInterrupt:

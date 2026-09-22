@@ -289,10 +289,12 @@ async def list_registered_patients(admin: Annotated[User, Depends(require_admin)
 async def list_all_hospital_appointments(admin: Annotated[User, Depends(require_admin)]):
     """Retrieve all booked appointments across the hospital for Admin Ledger."""
     appts = db.get_all_appointments()
+    users_by_id = {u.user_id: u.name for u in db.get_all_users()}
     result = [
         {
             "id": a.id,
             "user_id": a.user_id,
+            "patient_name": users_by_id.get(a.user_id, a.user_id),
             "doctor_name": a.doctor_name,
             "department_name": a.department_name,
             "date": a.date,

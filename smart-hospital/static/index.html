@@ -36,6 +36,14 @@
       </div>
     </div>
 
+    <div class="sidebar-section-label" style="display:flex; justify-content:space-between; align-items:center; margin-top:12px">
+      <span>📆 My Booked Appointments</span>
+      <button id="refreshAppointmentsBtn" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.75rem" title="Refresh Appointments">🔄</button>
+    </div>
+    <div class="user-appointments-list" id="userAppointmentsList" style="padding:0 8px; font-size:0.8rem; display:flex; flex-direction:column; gap:6px; max-height:180px; overflow-y:auto; margin-bottom:12px">
+      <div style="color:var(--text-muted); padding:6px 4px; font-size:0.75rem">No appointments booked yet.</div>
+    </div>
+
     <div class="sidebar-footer">
       <div class="patient-section">
         <div class="patient-avatar" id="patientAvatarSidebar">RS</div>
@@ -92,25 +100,15 @@
             <span class="sug-title">Book Appointment</span>
             <span class="sug-desc">Find and reserve doctor slots</span>
           </button>
-          <button class="suggestion-card" data-prompt="Show my latest lab reports and prescriptions">
+          <button class="suggestion-card" data-prompt="Show my latest lab reports">
             <span class="sug-icon">📋</span>
             <span class="sug-title">Lab Reports</span>
             <span class="sug-desc">View and explain test results</span>
-          </button>
-          <button class="suggestion-card" data-prompt="Prepare a consultation brief summary for my upcoming doctor visit">
-            <span class="sug-icon">📑</span>
-            <span class="sug-title">Doctor Brief</span>
-            <span class="sug-desc">Pre-consultation summary</span>
           </button>
           <button class="suggestion-card" data-prompt="What are the hospital visiting hours, emergency contacts, and policies?">
             <span class="sug-icon">ℹ️</span>
             <span class="sug-title">Hospital Info</span>
             <span class="sug-desc">Hours, policies and FAQs</span>
-          </button>
-          <button class="suggestion-card" data-prompt="What medications am I currently prescribed and their side effects?">
-            <span class="sug-icon">💊</span>
-            <span class="sug-title">My Prescriptions</span>
-            <span class="sug-desc">Medication details and advice</span>
           </button>
         </div>
       </div>
@@ -126,25 +124,22 @@
       <div class="slot-doctors-list" id="slotDoctorsList"></div>
     </div>
 
-    <!-- UPLOAD PREVIEW STRIP -->
-    <div class="upload-preview-strip" id="uploadPreviewStrip" style="display:none">
-      <div class="upload-previews" id="uploadPreviews"></div>
-    </div>
-
     <!-- QUICK CHIPS -->
     <div class="quick-chips-row" id="quickChipsRow">
       <button class="qchip" data-prompt="What departments are available?">🏥 Departments</button>
       <button class="qchip" data-prompt="Show available appointment slots" id="slotChip">📅 Book Slot</button>
       <button class="qchip" data-prompt="Show my lab reports">📋 Lab Reports</button>
       <button class="qchip" data-prompt="Show my scheduled appointments">📆 My Appointments</button>
-      <button class="qchip" data-prompt="Prepare my consultation brief">📑 Doctor Brief</button>
       <button class="qchip" data-prompt="What are hospital emergency guidelines?">🚑 Emergency</button>
-      <button class="qchip" data-prompt="What are my current prescriptions?">💊 Prescriptions</button>
     </div>
 
     <!-- INPUT BAR -->
     <div class="input-area">
       <div class="input-wrapper" id="inputWrapper">
+        <!-- UPLOAD PREVIEW STRIP -->
+        <div class="upload-preview-strip" id="uploadPreviewStrip" style="display:none">
+          <div class="upload-previews" id="uploadPreviews"></div>
+        </div>
         <div class="input-action-group">
           <button class="input-action-btn" id="attachBtn" title="Attach file or prescription">📎</button>
           <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.gif,.webp" style="display:none">

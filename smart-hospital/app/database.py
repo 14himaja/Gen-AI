@@ -495,8 +495,18 @@ class Database:
     def get_doctor(self, doctor_id: str) -> Optional[Doctor]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM doctors WHERE id = ?", (doctor_id,))
+            clean_id = (doctor_id or "").strip()
+            # 1. Exact ID match
+            cursor.execute("SELECT * FROM doctors WHERE id = ?", (clean_id,))
             row = cursor.fetchone()
+            # 2. Exact name match (case-insensitive)
+            if not row:
+                cursor.execute("SELECT * FROM doctors WHERE LOWER(name) = LOWER(?)", (clean_id,))
+                row = cursor.fetchone()
+            # 3. Partial name match
+            if not row and clean_id:
+                cursor.execute("SELECT * FROM doctors WHERE LOWER(name) LIKE ?", (f"%{clean_id.lower()}%",))
+                row = cursor.fetchone()
             if not row:
                 return None
             return Doctor(
@@ -542,8 +552,10 @@ class Database:
             query = "SELECT * FROM slots WHERE is_available = 1"
             params = []
             if doctor_id:
+                doc = self.get_doctor(doctor_id)
+                actual_id = doc.id if doc else doctor_id
                 query += " AND doctor_id = ?"
-                params.append(doctor_id)
+                params.append(actual_id)
             if date_str:
                 query += " AND date = ?"
                 params.append(date_str)
@@ -628,12 +640,13 @@ class Database:
         if not doc:
             return None
 
+        actual_doctor_id = doc.id
         with self._get_connection() as conn:
             cursor = conn.cursor()
             # Mark slot unavailable if exists
             cursor.execute(
                 "UPDATE slots SET is_available = 0 WHERE doctor_id = ? AND date = ? AND time = ? AND is_available = 1",
-                (doctor_id, date_str, time_str)
+                (actual_doctor_id, date_str, time_str)
             )
 
             appt_id = f"APPT-{uuid.uuid4().hex[:6].upper()}"
@@ -643,7 +656,7 @@ class Database:
                 (
                     appt_id,
                     user_id,
-                    doc.id,
+                    actual_doctor_id,
                     doc.name,
                     doc.department_name,
                     date_str,
@@ -683,6 +696,16 @@ class Database:
 
         self.log_audit(user_id=user_id, action="CANCEL_APPOINTMENT", details={"appointment_id": appt.id})
         return True
+
+    def delete_appointment_permanently(self, appointment_id: str, user_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM appointments WHERE id = ? AND user_id = ?", (appointment_id, user_id))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            self.log_audit(user_id=user_id, action="PURGE_APPOINTMENT", details={"appointment_id": appointment_id})
+        return deleted
 
     def reschedule_appointment(self, user_id: str, appointment_id: str, new_date: str, new_time: str) -> Optional[Appointment]:
         appt = self.get_appointment(appointment_id)
@@ -964,43 +987,58 @@ class Database:
 
     def search_knowledge_base(self, query: str) -> List[Dict[str, Any]]:
         q = query.lower()
-        query_terms = [t for t in q.split() if len(t) > 2]
-        results = []
+        stop_words = {"policy", "hospital", "general", "rules", "guidelines", "about", "what", "with", "from"}
+        query_terms = [t for t in q.split() if len(t) > 3 and t not in stop_words]
+        scored_results = []
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
-            # 1. Search Admin-Uploaded Chunked Hospital Documents first
+
+            # 1. Search Admin-Uploaded Chunked Hospital Documents (scored by term overlap)
             cursor.execute("SELECT chunk_id, chunk_title, chunk_text, doc_id FROM hospital_doc_chunks")
             for r in cursor.fetchall():
-                title = r["chunk_title"]
-                text = r["chunk_text"]
+                title = r["chunk_title"] or ""
+                text = r["chunk_text"] or ""
                 full_text = f"{title} {text}".lower()
-                if not query_terms or all(term in full_text for term in query_terms):
-                    results.append({
+                if not query_terms:
+                    score = 0
+                else:
+                    matched = sum(1 for term in query_terms if term in full_text)
+                    req = len(query_terms) if len(query_terms) > 1 else 1
+                    score = matched if matched >= req else 0
+                if score > 0:
+                    scored_results.append((score, {
                         "chunk_id": r["chunk_id"],
                         "doc_id": r["doc_id"],
                         "topic": f"Doc Chunk: {title}",
                         "content": text,
                         "source": f"hospital_doc:{r['doc_id']}"
-                    })
+                    }))
 
-            # 2. Search seed Knowledge Base
+            # 2. Search seed Knowledge Base (scored by term overlap)
             cursor.execute("SELECT id, topic, content FROM knowledge_base")
             for r in cursor.fetchall():
-                topic = r["topic"]
-                content = r["content"]
+                topic = r["topic"] or ""
+                content = r["content"] or ""
                 full_text = f"{topic} {content}".lower()
-                if not query_terms or all(term in full_text for term in query_terms):
-                    results.append({
+                if not query_terms:
+                    score = 0
+                else:
+                    matched = sum(1 for term in query_terms if term in full_text)
+                    req = len(query_terms) if len(query_terms) > 1 else 1
+                    score = matched if matched >= req else 0
+                if score > 0:
+                    scored_results.append((score, {
                         "chunk_id": f"kb_{r['id']}",
                         "doc_id": "kb",
                         "topic": topic,
                         "content": content,
                         "source": "knowledge_base"
-                    })
+                    }))
 
-            return results
+        # Sort by score descending, return top 10 most relevant results
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored_results[:10]]
 
     # --- Audit Logs ---
 

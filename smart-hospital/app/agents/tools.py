@@ -44,10 +44,13 @@ def search_doctors(department_name: str = "", specialty: str = "") -> Dict[str, 
 
 def get_available_slots(doctor_id: str, date: str) -> Dict[str, Any]:
     """Get available appointment time slots for a given doctor on a specific date (YYYY-MM-DD)."""
-    slots = db.get_slots(doctor_id=doctor_id, date_str=date)
+    doc = db.get_doctor(doctor_id)
+    actual_doc_id = doc.id if doc else doctor_id
+    slots = db.get_slots(doctor_id=actual_doc_id, date_str=date)
     return {
         "status": "success",
-        "doctor_id": doctor_id,
+        "doctor_id": actual_doc_id,
+        "doctor_name": doc.name if doc else doctor_id,
         "date": date,
         "available_slots": [s.time for s in slots]
     }
@@ -59,8 +62,9 @@ def book_appointment(user_id: str, doctor_id: str, date: str, time: str, confirm
     CRITICAL GUARDRAIL: The user must explicitly confirm the booking details before calling this tool with confirmed=True.
     If confirmed is False, return a confirmation prompt request.
     """
-    doc = db.doctors.get(doctor_id)
+    doc = db.get_doctor(doctor_id)
     doc_name = doc.name if doc else doctor_id
+    actual_doc_id = doc.id if doc else doctor_id
 
     if not confirmed:
         return {
@@ -71,7 +75,7 @@ def book_appointment(user_id: str, doctor_id: str, date: str, time: str, confirm
             ),
             "pending_action": {
                 "action": "book_appointment",
-                "doctor_id": doctor_id,
+                "doctor_id": actual_doc_id,
                 "doctor_name": doc_name,
                 "date": date,
                 "time": time,
@@ -79,7 +83,7 @@ def book_appointment(user_id: str, doctor_id: str, date: str, time: str, confirm
             }
         }
 
-    appt = db.book_appointment(user_id=user_id, doctor_id=doctor_id, date_str=date, time_str=time, notes=notes)
+    appt = db.book_appointment(user_id=user_id, doctor_id=actual_doc_id, date_str=date, time_str=time, notes=notes)
     if not appt:
         return {
             "status": "error",
@@ -263,7 +267,14 @@ def prepare_consultation_summary(user_id: str) -> Dict[str, Any]:
     docs = db.get_user_documents(user_id=user_id)
     user = db.get_user(user_id)
 
-    patient_name = user.name if user else user_id
+    # Resolve patient name from user record, or fall back to appointment records
+    patient_name = None
+    if user and user.name:
+        patient_name = user.name
+    elif appts:
+        # Some seeded appointments store the patient name indirectly; use user_id as fallback
+        patient_name = None
+    patient_name = patient_name or (f"Patient {user_id}" if user_id else "Patient")
 
     recent_appts = sorted(appts, key=lambda x: x.date, reverse=True)[:3]
     recent_docs = sorted(docs, key=lambda x: x.upload_date, reverse=True)[:3]
@@ -277,10 +288,10 @@ def prepare_consultation_summary(user_id: str) -> Dict[str, Any]:
             "recent_appointments": [
                 f"{a.date} - {a.doctor_name} ({a.department_name}) [{a.status.value}]"
                 for a in recent_appts
-            ],
+            ] if recent_appts else ["No past appointments found."],
             "relevant_documents": [
                 f"{d.title} ({d.document_type.value}) uploaded on {d.upload_date}: {d.summary or 'Document on file'}"
                 for d in recent_docs
-            ]
+            ] if recent_docs else ["No medical documents uploaded yet."]
         }
     }

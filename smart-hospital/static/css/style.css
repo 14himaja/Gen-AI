@@ -788,12 +788,13 @@ body {
    UPLOAD PREVIEW STRIP
    ===================================================== */
 .upload-preview-strip {
-  padding: 8px 20px 4px;
+  padding: 6px 12px 2px;
   flex-shrink: 0;
-  background: var(--bg-input);
-  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 4px;
 }
-.upload-previews { display: flex; gap: 10px; flex-wrap: wrap; }
+.upload-previews { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 
 .upload-thumb {
   position: relative;
