@@ -1,0 +1,142 @@
+[
+  {
+    "query": "add this to my daily note: 'reviewed the Q1 roadmap with sarah, she wants the mockups by friday'",
+    "should_trigger": true
+  },
+  {
+    "query": "search my vault for everything i've written about the Henderson project, i need to prep for a call",
+    "should_trigger": true
+  },
+  {
+    "query": "what open tasks do i have in obsidian? just the incomplete ones",
+    "should_trigger": true
+  },
+  {
+    "query": "create a new note from my meeting-notes template and call it 'Standup 2026-03-04'",
+    "should_trigger": true
+  },
+  {
+    "query": "append '- [ ] follow up with the design team about the nav bar' to my projects/mobile-redesign.md",
+    "should_trigger": true
+  },
+  {
+    "query": "how many notes are in my vault right now? also which ones have no links pointing to them?",
+    "should_trigger": true
+  },
+  {
+    "query": "read me today's daily note",
+    "should_trigger": true
+  },
+  {
+    "query": "set the status property on projects/q2-launch.md to 'in-review'",
+    "should_trigger": true
+  },
+  {
+    "query": "i want to write a script that pulls all notes tagged #meeting from the past week and summarizes them",
+    "should_trigger": true
+  },
+  {
+    "query": "move everything in my Inbox/ folder to Archive/2026/ and update the daily note with a log entry",
+    "should_trigger": true
+  },
+  {
+    "query": "check the sync history for my important.md and restore the version from two days ago",
+    "should_trigger": true
+  },
+  {
+    "query": "list all my bookmarks in obsidian",
+    "should_trigger": true
+  },
+  {
+    "query": "run obsidian eval to count how many markdown files have a 'status' property set to 'done'",
+    "should_trigger": true
+  },
+  {
+    "query": "find all notes in my vault that link to projects/q1-review.md",
+    "should_trigger": true
+  },
+  {
+    "query": "take a screenshot of my current obsidian view and save it to screenshots/",
+    "should_trigger": true
+  },
+  {
+    "query": "show me all tags in my vault sorted by how often they're used",
+    "should_trigger": true
+  },
+  {
+    "query": "query my Obsidian Bases 'Tasks' view and show all entries where priority is high",
+    "should_trigger": true
+  },
+  {
+    "query": "what notes have i opened recently in obsidian?",
+    "should_trigger": true
+  },
+  {
+    "query": "delete my scratch/temp-ideas.md note permanently",
+    "should_trigger": true
+  },
+  {
+    "query": "rename my 'Meeting 2026-02-28.md' note to 'Sprint Retro 2026-02-28.md'",
+    "should_trigger": true
+  },
+  {
+    "query": "how do i change the accent color in obsidian? i want something more muted than the default purple",
+    "should_trigger": false
+  },
+  {
+    "query": "i can't figure out how to enable community plugins in obsidian — the toggle is greyed out in safe mode",
+    "should_trigger": false
+  },
+  {
+    "query": "does obsidian have a built-in kanban view or do i need a plugin for that?",
+    "should_trigger": false
+  },
+  {
+    "query": "my icloud sync for obsidian keeps conflicting with files on my ipad — how do i resolve this without losing data?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i set up the obsidian git plugin to auto-commit my vault every hour?",
+    "should_trigger": false
+  },
+  {
+    "query": "i use notion for my notes but i'm thinking of switching to obsidian — what's the best way to export from notion and import into obsidian?",
+    "should_trigger": false
+  },
+  {
+    "query": "in the dataview plugin, how do i write a query that shows all notes with a due-date property before today?",
+    "should_trigger": false
+  },
+  {
+    "query": "i want to customize the obsidian theme with css — how do i target the sidebar background color specifically?",
+    "should_trigger": false
+  },
+  {
+    "query": "what's the keyboard shortcut to open the command palette in obsidian on mac?",
+    "should_trigger": false
+  },
+  {
+    "query": "i'm writing a python script to parse markdown files from my notes folder and extract all the headings into a CSV — what's the best library for this?",
+    "should_trigger": false
+  },
+  {
+    "query": "how does obsidian's graph view work? i want to understand what the clusters represent",
+    "should_trigger": false
+  },
+  {
+    "query": "is there a way to publish my obsidian vault publicly? what are the options?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i configure a hotkey in obsidian to run a specific command from the command palette?",
+    "should_trigger": false
+  },
+  {
+    "query": "explain what the 'unresolved links' section in obsidian's graph view means",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i use templater plugin variables like {{date}} in obsidian?",
+    "should_trigger": false
+  }
+]

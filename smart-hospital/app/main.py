@@ -10,11 +10,23 @@ from app.api.auth import router as auth_router
 from app.api.hospital import router as hospital_router
 from app.api.chat import router as chat_router
 from app.api.admin import router as admin_router
+from app.api.voice_call import router as voice_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle startup and shutdown management."""
+    try:
+        from app.services.faiss_store import faiss_store
+        from app.database import db
+        if faiss_store.index is None or faiss_store.index.ntotal == 0:
+            print("[Lifespan] FAISS index missing or empty. Auto-building from SQLite chunks...")
+            faiss_store.rebuild(db.get_all_chunks_for_rebuild())
+        else:
+            print(f"[Lifespan] FAISS Vector Store active with {faiss_store.index.ntotal} vectors.")
+    except Exception as e:
+        print(f"[Lifespan Warning] FAISS store auto-init warning: {e}")
+
     print(f"[{settings.APP_NAME}] Server started successfully on http://{settings.HOST}:{settings.PORT}")
     print(f"[{settings.APP_NAME}] Web UI available at: http://{settings.HOST}:{settings.PORT}/")
     print(f"[{settings.APP_NAME}] API documentation at: http://{settings.HOST}:{settings.PORT}/docs")
@@ -50,6 +62,7 @@ def create_app() -> FastAPI:
     app.include_router(hospital_router, prefix=settings.API_PREFIX)
     app.include_router(chat_router, prefix=settings.API_PREFIX)
     app.include_router(admin_router, prefix=settings.API_PREFIX)
+    app.include_router(voice_router)
 
     @app.get("/")
     async def root():

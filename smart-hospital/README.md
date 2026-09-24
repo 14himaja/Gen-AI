@@ -1,73 +1,94 @@
-# 🏥 Smart Hospital AI Assistant
+# 🏥 Smart Hospital AI Assistant (Text & Real-Time Gemini Live Voice)
 
-A conversational, multi-agent AI healthcare operations assistant built with **Google ADK**, **FastAPI**, **Pydantic v2**, and **FastMCP**, configured to run seamlessly with the **Groq API** and `openai/gpt-oss-120b`.
+A conversational healthcare operations assistant built with **Google ADK**, **Google Gemini Live API (Native Audio)**, **FastAPI**, **Pydantic v2**, and **FAISS RAG**.
+
+> **Note:** Voice communication uses Google's Gemini Live API with native audio input/output over WebSockets. **No external Speech-to-Text (STT) or Text-to-Speech (TTS) service is used.**
 
 ---
 
-## 🌟 Key Capabilities (PRD Implementation)
+## 🎙️ Real-Time Gemini Live Voice Agent Architecture
 
-1. **Authentication & Identity Verification (FR-001 - FR-006)**:
-   - User registration and OTP simulation.
-   - JWT session management with role-based access (Patient, Doctor, Staff, Admin).
-   - "LLM is never the security boundary" – identity context is injected into ADK session state directly from validated tokens.
+The application provides a low-latency, real-time voice-to-voice conversation pipeline:
 
-2. **Hospital Operations & Catalog (FR-007 - FR-013)**:
-   - Department and doctor directory search.
+```text
+ Browser Microphone (16kHz PCM Float32 → Int16)
+        ↓
+ WebSocket (/ws/voice)
+        ↓
+ FastAPI Backend (Voice Gateway & Transport Abstraction)
+        ↓
+ Gemini Live API (gemini-3.1-flash-live-preview)
+   • Native Audio Understanding
+   • Spoken Reasoning
+   • Function/Tool Calling & RAG Integration
+        ↓
+ FastAPI Backend (24kHz Raw PCM Streaming)
+        ↓
+ WebSocket (/ws/voice)
+        ↓
+ Browser Speaker (Web Audio API PCM Playback)
+```
+
+### Key Voice Features:
+1. **Native Voice-to-Voice:** Direct audio stream into Gemini Live without intermediate STT or TTS layers.
+2. **Tool Calling & RAG:** Gemini Live directly executes hospital Python tools (`search_doctors`, `get_available_slots`, `book_appointment`, `search_hospital_knowledge`, etc.) during voice calls and speaks the output naturally.
+3. **Barge-In / Interruption:** When the caller interrupts Gemini while speaking, the Web Audio queue is instantly cleared, playback stops, and the new user audio is processed.
+4. **Transport Abstraction:** Clean `BaseAudioTransport` layer separating the voice engine from the client. Supports `BrowserAudioTransport` today and `SmartfloAudioTransport` for future telephony integration.
+5. **Coexistence:** Text Mode (ADK Root Agent) and Voice Mode (Gemini Live Engine) operate side-by-side without breaking existing text endpoints.
+
+---
+
+## 🌟 Key Capabilities
+
+1. **Real-Time Voice Call Agent (`/static/call.html`)**:
+   - Web Audio API microphone capture (16kHz PCM mono).
+   - Real-time 24kHz PCM audio playback streaming.
+   - Interactive status badges (Listening, Thinking, AI Speaking, Interrupted).
+
+2. **Hospital Operations & Catalog**:
+   - Department and doctor directory search with fuzzy/root word matching.
    - Real-time slot availability checking.
-   - Booking, cancellation, and rescheduling workflows with **action confirmation guardrails**.
+   - Booking, cancellation, and rescheduling workflows with confirmation guardrails.
 
-3. **Medical Document Processing (FR-014 - FR-016)**:
-   - Parsing and summarizing laboratory reports and prescriptions.
-   - Medical safety boundaries preventing unauthorized autonomous diagnoses.
+3. **Hospital Knowledge Base & FAISS RAG**:
+   - Hybrid vector search (SQLite + FAISS) for hospital policies, visiting hours, check-in instructions, and emergency guidelines.
 
-4. **Hospital Knowledge Base & RAG (FR-017, FR-023)**:
-   - Fast retrieval of hospital policies, visiting hours, check-in instructions, and emergency guidelines.
-
-5. **Multi-Agent Architecture with Google ADK (FR-024)**:
-   - **`hospital_root_agent`**: Main coordinator and intent router.
+4. **Multi-Agent Architecture with Google ADK**:
+   - **`hospital_root_agent`**: Primary text coordinator.
    - **`appointment_agent`**: Doctor search, slots, and booking.
    - **`document_agent`**: Report extraction and plain-English translation.
-   - **`info_agent`**: Hospital FAQs, visiting hours, and policies.
+   - **`info_agent`**: Hospital FAQs and policies.
    - **`history_agent`**: Strictly authorized patient history.
-   - **`report_agent`**: Pre-consultation briefing synthesis.
-
-6. **Agent Workflow Patterns (PRD Section 27)**:
-   - **Sequential Workflow** (`SequentialAgent`): Document extraction $\rightarrow$ reference range validation $\rightarrow$ summary synthesis.
-   - **Parallel Workflow** (`ParallelAgent`): Concurrent fetch of past history + documents $\rightarrow$ consultation brief compiler.
-   - **Loop Workflow** (`LoopAgent`): Iterative draft generation and safety policy review.
-
-7. **Standard Model Context Protocol (MCP) Server (FR-021)**:
-   - FastMCP service in `app/mcp_server/server.py` exposing hospital capabilities.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Configure Environment
-Ensure your `.env` in the `smart-hospital/` directory contains:
+### 1. Configure Environment (`.env`)
 ```ini
-GROK_API_KEY="gsk_..."
-MODEL="openai/gpt-oss-120b"
+GOOGLE_API_KEY=your_google_api_key_here
+GEMINI_API_KEY=your_google_api_key_here
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
 ```
 
-### 2. Run the FastAPI REST Server
+### 2. Run the Server
 ```bash
 python run.py serve
 ```
-Interactive OpenAPI documentation will be accessible at:
-👉 **`http://127.0.0.1:8000/docs`**
+- Web UI: 👉 **`http://127.0.0.1:8500/`**
+- Real-Time Voice Agent UI: 👉 **`http://127.0.0.1:8500/static/call.html`**
+- Interactive API Docs: 👉 **`http://127.0.0.1:8500/docs`**
 
-### 3. Run the Interactive CLI Chat Session
-Chat with the Google ADK multi-agent assistant directly from your terminal as patient Rahul (`P1001`):
-```bash
-python run.py chat --user P1001
-```
+### 3. Open Voice Agent & Grant Mic Permissions
+1. Navigate to `http://127.0.0.1:8500/static/call.html`.
+2. Click **"Start Real-Time Voice Call"**.
+3. Allow browser microphone access when prompted.
+4. Speak naturally (e.g. *"What are the hospital visiting hours?"* or *"Find me a cardiologist doctor"*).
 
-### 4. Run the Automated Tests
+### 4. Run Automated End-to-End Tests
 ```bash
-python run.py test
-# or
-pytest tests/ -v
+python scratch/test_voice_e2e.py
+python scratch/test_voice_tools_booking.py
 ```
 
 ---
@@ -77,27 +98,33 @@ pytest tests/ -v
 ```text
 smart-hospital/
 ├── app/
-│   ├── __init__.py
-│   ├── config.py             # Settings, environment, and model configuration
-│   ├── models.py             # Pydantic v2 domain schemas (Users, Doctors, Appointments, Docs)
-│   ├── database.py           # In-memory database with pre-seeded synthetic data
-│   ├── main.py               # FastAPI application factory and lifespan
-│   ├── api/                  # REST API routers
-│   │   ├── auth.py           # Registration, OTP verification, JWT login
-│   │   ├── hospital.py       # Mock hospital REST API (/departments, /doctors, /slots, etc.)
-│   │   └── chat.py           # Chat endpoint connecting to Google ADK Runner
-│   ├── agents/               # Google ADK Multi-Agent System
-│   │   ├── llm.py            # LiteLLM provider initialization for Groq
-│   │   ├── tools.py          # Deterministic hospital function tools
-│   │   ├── callbacks.py      # Authorization checks, confirmation guardrails, audit logging
-│   │   ├── sub_agents.py     # Appointment, Document, Info, History, Report agents
-│   │   ├── workflows.py      # SequentialAgent, ParallelAgent, LoopAgent workflows
-│   │   └── root_agent.py     # Main Root Coordinator and Runner
-│   └── mcp_server/           # Model Context Protocol (MCP) server
-│       └── server.py         # FastMCP tools exposure
-├── tests/
-│   └── test_smart_hospital.py# Comprehensive automated test suite
-├── run.py                    # Unified CLI runner (serve, chat, test)
+│   ├── config.py             # Configuration & environment settings
+│   ├── database.py           # SQLite database & FAISS RAG search
+│   ├── main.py               # FastAPI factory, lifespan, and static mounting
+│   ├── voice/                # Real-time voice engine package
+│   │   ├── transport.py      # AudioTransport abstraction (Browser & Smartflo)
+│   │   ├── gemini_live_session.py # Gemini Live API session manager & tool calling
+│   │   └── session_manager.py     # Multi-session isolation manager
+│   ├── api/                  # REST API & WebSocket routers
+│   │   ├── voice_call.py     # /ws/voice & /ws/smartflo WebSockets
+│   │   ├── chat.py           # Text Chat endpoint (Google ADK)
+│   │   └── hospital.py       # Hospital REST endpoints
+│   └── agents/               # Google ADK multi-agent tools & prompts
+├── static/
+│   ├── call.html             # Real-Time Voice Agent browser UI & Web Audio PCM client
+│   └── index.html            # Main Patient Portal UI
+├── scratch/
+│   ├── test_voice_e2e.py     # End-to-end voice & text test suite
+│   └── test_voice_tools_booking.py # Voice tool calling test suite
+└── run.py                    # Server & CLI runner
+```
+
+---
+
+## 📱 Future Smartflo Integration
+
+Smartflo telephony can be connected to the voice gateway by using `SmartfloAudioTransport` mounted at `/ws/smartflo`. The core `GeminiLiveSession`, hospital tools, database, and RAG layers require **zero changes** when attaching Smartflo or any other telephony provider.
+
 ├── requirements.txt
 └── .env
 ```

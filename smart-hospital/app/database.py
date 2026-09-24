@@ -240,17 +240,6 @@ class Database:
                 cursor.execute("ALTER TABLE hospital_documents ADD COLUMN file_type TEXT DEFAULT 'Direct Text'")
             except Exception:
                 pass
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS hospital_doc_chunks (
-                    chunk_id TEXT PRIMARY KEY,
-                    doc_id TEXT NOT NULL,
-                    chunk_index INTEGER NOT NULL,
-                    chunk_title TEXT NOT NULL,
-                    chunk_text TEXT NOT NULL,
-                    word_count INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
             conn.commit()
 
     def _seed_data_if_empty(self):
@@ -492,32 +481,87 @@ class Database:
                 for r in cursor.fetchall()
             ]
 
+    def _row_to_doctor(self, row: Any) -> Doctor:
+        days = row["available_days"]
+        if isinstance(days, str):
+            try:
+                days = json.loads(days)
+            except Exception:
+                days = [d.strip() for d in days.split(",") if d.strip()]
+        return Doctor(
+            id=row["id"],
+            name=row["name"],
+            department_id=row["department_id"],
+            department_name=row["department_name"],
+            specialty=row["specialty"],
+            available_days=days if isinstance(days, list) else [],
+            consultation_fee=float(row["consultation_fee"])
+        )
+
     def get_doctor(self, doctor_id: str) -> Optional[Doctor]:
+        if not doctor_id:
+            return None
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            clean_id = (doctor_id or "").strip()
-            # 1. Exact ID match
-            cursor.execute("SELECT * FROM doctors WHERE id = ?", (clean_id,))
+            clean_id = str(doctor_id).strip()
+
+            # 1. Exact ID match (e.g. DOC-001)
+            cursor.execute("SELECT * FROM doctors WHERE UPPER(id) = UPPER(?)", (clean_id,))
             row = cursor.fetchone()
+            if row:
+                return self._row_to_doctor(row)
+
             # 2. Exact name match (case-insensitive)
-            if not row:
-                cursor.execute("SELECT * FROM doctors WHERE LOWER(name) = LOWER(?)", (clean_id,))
-                row = cursor.fetchone()
-            # 3. Partial name match
-            if not row and clean_id:
-                cursor.execute("SELECT * FROM doctors WHERE LOWER(name) LIKE ?", (f"%{clean_id.lower()}%",))
-                row = cursor.fetchone()
-            if not row:
-                return None
-            return Doctor(
-                id=row["id"],
-                name=row["name"],
-                department_id=row["department_id"],
-                department_name=row["department_name"],
-                specialty=row["specialty"],
-                available_days=json.loads(row["available_days"]),
-                consultation_fee=float(row["consultation_fee"])
-            )
+            cursor.execute("SELECT * FROM doctors WHERE LOWER(name) = LOWER(?)", (clean_id,))
+            row = cursor.fetchone()
+            if row:
+                return self._row_to_doctor(row)
+
+            cursor.execute("SELECT * FROM doctors")
+            all_docs = [self._row_to_doctor(r) for r in cursor.fetchall()]
+
+            import re
+            def normalize_name(s: str) -> str:
+                s = s.lower().replace(".", " ").replace(",", " ")
+                s = re.sub(r"\b(dr|doctor|prof|physician|specialist)\b", "", s)
+                return re.sub(r"\s+", " ", s).strip()
+
+            norm_query = normalize_name(clean_id)
+            if not norm_query:
+                return all_docs[0] if all_docs else None
+
+            # 3. Match normalized exact name
+            for d in all_docs:
+                if normalize_name(d.name) == norm_query:
+                    return d
+
+            # 4. Token substring matching in doctor name
+            query_tokens = [t for t in norm_query.split() if len(t) > 1]
+            for d in all_docs:
+                doc_norm = normalize_name(d.name)
+                if norm_query in doc_norm or doc_norm in norm_query:
+                    return d
+                doc_tokens = doc_norm.split()
+                if query_tokens and all(any(qt in dt or dt in qt for dt in doc_tokens) for qt in query_tokens):
+                    return d
+
+            # 5. Partial token match (e.g. "Sarah", "Alan", "Elena", "BK", "Sharma")
+            for d in all_docs:
+                doc_norm = normalize_name(d.name)
+                for qt in query_tokens:
+                    if qt in doc_norm.split() or (len(qt) >= 3 and qt in doc_norm):
+                        return d
+
+            # 6. Match by specialty or department (e.g. "cardiologist", "dermatologist", "orthopedic")
+            for d in all_docs:
+                spec_norm = normalize_name(d.specialty)
+                dept_norm = normalize_name(d.department_name)
+                for qt in query_tokens:
+                    root = qt.rstrip("s").replace("ist", "").replace("y", "").replace("ics", "").replace("ic", "")
+                    if (qt in spec_norm or qt in dept_norm) or (len(root) >= 4 and (root in spec_norm or root in dept_norm)):
+                        return d
+
+            return None
 
     def get_doctors(self, department_name: Optional[str] = None, specialty: Optional[str] = None) -> List[Doctor]:
         with self._get_connection() as conn:
@@ -528,25 +572,64 @@ class Database:
                 query += " AND LOWER(department_name) LIKE ?"
                 params.append(f"%{department_name.lower()}%")
             if specialty:
-                query += " AND LOWER(specialty) LIKE ?"
-                params.append(f"%{specialty.lower()}%")
+                clean_spec = specialty.lower().strip()
+                root_spec = clean_spec.replace("ist", "").replace("y", "").replace("ics", "").replace("ic", "").rstrip("s")
+                query += " AND (LOWER(specialty) LIKE ? OR LOWER(department_name) LIKE ? OR LOWER(specialty) LIKE ? OR LOWER(department_name) LIKE ?)"
+                params.extend([f"%{clean_spec}%", f"%{clean_spec}%", f"%{root_spec}%", f"%{root_spec}%"])
             cursor.execute(query, params)
-            return [
-                Doctor(
-                    id=r["id"],
-                    name=r["name"],
-                    department_id=r["department_id"],
-                    department_name=r["department_name"],
-                    specialty=r["specialty"],
-                    available_days=json.loads(r["available_days"]),
-                    consultation_fee=float(r["consultation_fee"])
+            rows = cursor.fetchall()
+            # Fallback if no exact match found but specialty was provided
+            if not rows and specialty:
+                cursor.execute("SELECT * FROM doctors")
+                rows = cursor.fetchall()
+            return [self._row_to_doctor(r) for r in rows]
+
+    def ensure_active_slots(self, days_ahead: int = 14) -> None:
+        """Ensure active slots exist in SQLite for the upcoming days for all doctors."""
+        today = date.today()
+        time_options = ["09:00", "10:00", "11:30", "14:00", "15:30", "16:30"]
+        weekday_map = {
+            0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday",
+            4: "Friday", 5: "Saturday", 6: "Sunday"
+        }
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM doctors")
+            docs = cursor.fetchall()
+
+            new_slots = []
+            for doc in docs:
+                doc_id = doc["id"]
+                doc_name = doc["name"]
+                dept_name = doc["department_name"]
+                try:
+                    avail_days = json.loads(doc["available_days"])
+                except Exception:
+                    avail_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+                for offset in range(0, days_ahead + 1):
+                    target_date = today + timedelta(days=offset)
+                    target_weekday = weekday_map[target_date.weekday()]
+                    if target_weekday not in avail_days:
+                        continue
+
+                    target_date_str = target_date.isoformat()
+                    for t in time_options[:4]:
+                        slot_id = f"SLOT-{doc_id}-{target_date_str}-{t.replace(':', '')}"
+                        new_slots.append((slot_id, doc_id, doc_name, dept_name, target_date_str, t, 1))
+
+            if new_slots:
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO slots (slot_id, doctor_id, doctor_name, department_name, date, time, is_available) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    new_slots
                 )
-                for r in cursor.fetchall()
-            ]
+                conn.commit()
 
     # --- Slots ---
 
     def get_slots(self, doctor_id: Optional[str] = None, date_str: Optional[str] = None, available_only: bool = False) -> List[AppointmentSlot]:
+        self.ensure_active_slots()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             query = "SELECT * FROM slots WHERE 1=1"
@@ -556,9 +639,10 @@ class Database:
                 actual_id = doc.id if doc else doctor_id
                 query += " AND doctor_id = ?"
                 params.append(actual_id)
-            if date_str:
+            if date_str and date_str.strip():
                 query += " AND date = ?"
-                params.append(date_str)
+                params.append(date_str.strip())
+            query += " ORDER BY date ASC, time ASC"
             cursor.execute(query, params)
             slots_rows = cursor.fetchall()
 
@@ -889,6 +973,22 @@ class Database:
             conn.commit()
 
         self.log_audit(user_id=user_id, action="UPLOAD_DOCUMENT", details={"document_id": doc.id, "title": title})
+
+        # Sync FAISS vector store
+        try:
+            from app.services.faiss_store import faiss_store
+            type_str = doc_type.value if hasattr(doc_type, "value") else str(doc_type)
+            faiss_store.add_items([{
+                "chunk_id": doc.id,
+                "doc_id": doc.id,
+                "text": f"Patient Document: {title}\nType: {type_str}\nSummary: {doc.summary}\nContent: {extracted_text}",
+                "user_id": user_id,
+                "topic": title,
+                "source": "user_document"
+            }])
+        except Exception as e:
+            print(f"[FAISS Sync Warning] Error adding patient document to FAISS: {e}")
+
         return doc
 
     def delete_document(self, document_id: str, user_id: Optional[str] = None) -> bool:
@@ -902,9 +1002,15 @@ class Database:
             deleted = cursor.rowcount > 0
         if deleted:
             self.log_audit(user_id=user_id or "UNKNOWN", action="DELETE_USER_DOCUMENT", details={"document_id": document_id})
+            # Sync FAISS vector store
+            try:
+                from app.services.faiss_store import faiss_store
+                faiss_store.remove_document_chunks(document_id)
+            except Exception as e:
+                print(f"[FAISS Sync Warning] Error removing patient document from FAISS: {e}")
         return deleted
 
-    # --- Admin Hospital Documents & Semantic Chunking ---
+    # --- Admin Hospital Documents & FAISS-backed Chunk Management ---
 
     def add_hospital_document(
         self,
@@ -917,39 +1023,36 @@ class Database:
         doc_id = f"HDOC-{uuid.uuid4().hex[:6].upper()}"
         today_str = date.today().isoformat()
         
-        # 1. Chunk document using sliding window chunker
-        chunks = chunk_text(content, chunk_size=400, overlap=80)
-        
-        now_str = datetime.utcnow().isoformat()
-        chunk_rows = []
-        for c in chunks:
-            chunk_id = f"CHUNK-{doc_id}-{c['chunk_index']}"
-            chunk_rows.append((
-                chunk_id,
-                doc_id,
-                c["chunk_index"],
-                c["chunk_title"],
-                c["chunk_text"],
-                c["word_count"],
-                now_str
-            ))
-
+        # 1. Save parent document metadata in SQLite (structured data only)
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Save parent document
             cursor.execute(
                 "INSERT INTO hospital_documents VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (doc_id, title, category, uploaded_by, today_str, content, file_type)
             )
-            # Save chunks
-            cursor.executemany(
-                "INSERT INTO hospital_doc_chunks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                chunk_rows
-            )
             conn.commit()
 
+        # 2. Chunk document and store chunks strictly in FAISS vector store
+        chunks = chunk_text(content, chunk_size=400, overlap=80)
         self.log_audit(user_id=uploaded_by, action="ADMIN_UPLOAD_HOSPITAL_DOC", details={"doc_id": doc_id, "title": title, "file_type": file_type, "chunk_count": len(chunks)})
         
+        try:
+            from app.services.faiss_store import faiss_store
+            faiss_items = [
+                {
+                    "chunk_id": f"CHUNK-{doc_id}-{c['chunk_index']}",
+                    "doc_id": doc_id,
+                    "text": f"{c['chunk_title']}\n{c['chunk_text']}",
+                    "user_id": "PUBLIC",
+                    "topic": f"Doc Chunk: {c['chunk_title']}",
+                    "source": "hospital_doc"
+                }
+                for c in chunks
+            ]
+            faiss_store.add_items(faiss_items)
+        except Exception as e:
+            print(f"[FAISS Sync Warning] Error adding hospital doc chunks to FAISS: {e}")
+
         return {
             "id": doc_id,
             "title": title,
@@ -962,31 +1065,36 @@ class Database:
         }
 
     def get_hospital_documents(self) -> List[Dict[str, Any]]:
+        """Retrieve hospital parent documents from SQLite and augment with FAISS chunk counts."""
+        try:
+            from app.services.faiss_store import faiss_store
+        except Exception:
+            faiss_store = None
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT d.id, d.title, d.category, d.uploaded_by, d.upload_date, d.content,
-                       COALESCE(d.file_type, 'Direct Text') as file_type,
-                       COUNT(c.chunk_id) as chunk_count
-                FROM hospital_documents d
-                LEFT JOIN hospital_doc_chunks c ON d.id = c.doc_id
-                GROUP BY d.id
-                ORDER BY d.upload_date DESC
+                SELECT id, title, category, uploaded_by, upload_date, content,
+                       COALESCE(file_type, 'Direct Text') as file_type
+                FROM hospital_documents
+                ORDER BY upload_date DESC
             """)
             rows = cursor.fetchall()
-            return [
-                {
-                    "id": r["id"],
+            results = []
+            for r in rows:
+                doc_id = r["id"]
+                c_count = faiss_store.count_chunks_for_doc(doc_id) if faiss_store else 0
+                results.append({
+                    "id": doc_id,
                     "title": r["title"],
                     "category": r["category"],
                     "uploaded_by": r["uploaded_by"],
                     "upload_date": r["upload_date"],
                     "content": r["content"],
                     "file_type": r["file_type"],
-                    "chunk_count": r["chunk_count"]
-                }
-                for r in rows
-            ]
+                    "chunk_count": c_count
+                })
+            return results
 
     def update_hospital_document(
         self,
@@ -1011,64 +1119,154 @@ class Database:
                 "UPDATE hospital_documents SET title = ?, category = ?, content = ? WHERE id = ?",
                 (new_title, new_category, new_content, doc_id)
             )
-
-            # If content changed, re-chunk document
-            if content and content.strip() and content.strip() != doc_row["content"]:
-                cursor.execute("DELETE FROM hospital_doc_chunks WHERE doc_id = ?", (doc_id,))
-                chunks = chunk_text(new_content, chunk_size=400, overlap=80)
-                now_str = datetime.utcnow().isoformat()
-                chunk_rows = [
-                    (f"CHUNK-{doc_id}-{c['chunk_index']}", doc_id, c["chunk_index"], c["chunk_title"], c["chunk_text"], c["word_count"], now_str)
-                    for c in chunks
-                ]
-                cursor.executemany("INSERT INTO hospital_doc_chunks VALUES (?, ?, ?, ?, ?, ?, ?)", chunk_rows)
-            elif title and title.strip() and title.strip() != doc_row["title"]:
-                # If title changed, update chunk titles in chunk index
-                cursor.execute("SELECT chunk_id, chunk_index FROM hospital_doc_chunks WHERE doc_id = ?", (doc_id,))
-                existing_chunks = cursor.fetchall()
-                for chk in existing_chunks:
-                    updated_chunk_title = f"{new_title} (Chunk {chk['chunk_index'] + 1})"
-                    cursor.execute("UPDATE hospital_doc_chunks SET chunk_title = ? WHERE chunk_id = ?", (updated_chunk_title, chk["chunk_id"]))
-
             conn.commit()
 
         self.log_audit(user_id=user_id, action="ADMIN_UPDATE_HOSPITAL_DOC", details={"doc_id": doc_id, "title": new_title})
+
+        # Update FAISS chunks if content changed
+        if content and content.strip() and content.strip() != doc_row["content"]:
+            try:
+                from app.services.faiss_store import faiss_store
+                faiss_store.remove_document_chunks(doc_id)
+                chunks = chunk_text(new_content, chunk_size=400, overlap=80)
+                faiss_items = [
+                    {
+                        "chunk_id": f"CHUNK-{doc_id}-{c['chunk_index']}",
+                        "doc_id": doc_id,
+                        "text": f"{c['chunk_title']}\n{c['chunk_text']}",
+                        "user_id": "PUBLIC",
+                        "topic": f"Doc Chunk: {c['chunk_title']}",
+                        "source": "hospital_doc"
+                    }
+                    for c in chunks
+                ]
+                faiss_store.add_items(faiss_items)
+            except Exception as e:
+                print(f"[FAISS Sync Warning] Error updating FAISS index on content update: {e}")
+
         docs = [d for d in self.get_hospital_documents() if d["id"] == doc_id]
         return docs[0] if docs else None
 
     def get_hospital_doc_chunks(self, doc_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            if doc_id:
-                cursor.execute("SELECT * FROM hospital_doc_chunks WHERE doc_id = ? ORDER BY chunk_index ASC", (doc_id,))
-            else:
-                cursor.execute("SELECT * FROM hospital_doc_chunks ORDER BY created_at DESC")
-            rows = cursor.fetchall()
-            return [
-                {
-                    "chunk_id": r["chunk_id"],
-                    "doc_id": r["doc_id"],
-                    "chunk_index": r["chunk_index"],
-                    "chunk_title": r["chunk_title"],
-                    "chunk_text": r["chunk_text"],
-                    "word_count": r["word_count"],
-                    "created_at": r["created_at"]
-                }
-                for r in rows
-            ]
+        """Retrieve document chunks directly from FAISS vector store."""
+        try:
+            from app.services.faiss_store import faiss_store
+            return faiss_store.get_chunks(doc_id)
+        except Exception as e:
+            print(f"[FAISS Error] Failed to fetch chunks from FAISS vector store: {e}")
+            return []
 
     def delete_hospital_document(self, doc_id: str, user_id: str = "A4001") -> bool:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM hospital_documents WHERE id = ?", (doc_id,))
-            cursor.execute("DELETE FROM hospital_doc_chunks WHERE doc_id = ?", (doc_id,))
             conn.commit()
         self.log_audit(user_id=user_id, action="ADMIN_DELETE_HOSPITAL_DOC", details={"doc_id": doc_id})
+
+        # Sync FAISS vector store
+        try:
+            from app.services.faiss_store import faiss_store
+            faiss_store.remove_document_chunks(doc_id)
+        except Exception as e:
+            print(f"[FAISS Sync Warning] Error updating FAISS index on delete: {e}")
+
         return True
 
-    # --- Knowledge Base & Multi-Source RAG Search ---
+    def get_all_chunks_for_rebuild(self) -> List[Dict[str, Any]]:
+        """Extract parent document records from SQLite and compute chunk list for FAISS rebuild."""
+        all_items = []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
 
-    def search_knowledge_base(self, query: str) -> List[Dict[str, Any]]:
+            # 1. Hospital Documents
+            cursor.execute("SELECT id, title, content FROM hospital_documents")
+            for r in cursor.fetchall():
+                doc_id = r["id"]
+                title = r["title"] or ""
+                content = r["content"] or ""
+                chunks = chunk_text(content, chunk_size=400, overlap=80)
+                for c in chunks:
+                    all_items.append({
+                        "chunk_id": f"CHUNK-{doc_id}-{c['chunk_index']}",
+                        "doc_id": doc_id,
+                        "user_id": "PUBLIC",
+                        "topic": f"Doc Chunk: {c['chunk_title']}",
+                        "text": f"{c['chunk_title']}\n{c['chunk_text']}",
+                        "source": "hospital_doc"
+                    })
+
+            # 2. Knowledge Base Seed Items
+            cursor.execute("SELECT id, topic, content FROM knowledge_base")
+            for r in cursor.fetchall():
+                topic = r["topic"] or ""
+                kb_content = r["content"] or ""
+                all_items.append({
+                    "chunk_id": f"kb_{r['id']}",
+                    "doc_id": "kb",
+                    "user_id": "PUBLIC",
+                    "topic": topic,
+                    "text": f"{topic}\n{kb_content}",
+                    "source": "knowledge_base"
+                })
+
+            # 3. Patient Medical Documents
+            cursor.execute("SELECT id, user_id, title, document_type, extracted_text, summary FROM documents")
+            for r in cursor.fetchall():
+                doc_title = r["title"] or ""
+                extracted = r["extracted_text"] or ""
+                doc_summary = r["summary"] or ""
+                doc_type = r["document_type"] or "medical_record"
+                all_items.append({
+                    "chunk_id": r["id"],
+                    "doc_id": r["id"],
+                    "user_id": r["user_id"],
+                    "topic": f"{doc_title} ({doc_type})",
+                    "text": f"Patient Document: {doc_title}\nType: {doc_type}\nSummary: {doc_summary}\nContent: {extracted}",
+                    "source": "user_document"
+                })
+
+        return all_items
+
+
+    # --- Knowledge Base & Multi-Source RAG Search (FAISS + SQLite Hybrid) ---
+
+    def search_knowledge_base(self, query: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Perform RAG knowledge search.
+        Step 1: FAISS Vector Similarity Search -> Candidate vector matches & chunk text payloads
+        Step 2: Patient Resource Authorization Check
+        """
+        authorized_results = []
+        try:
+            from app.services.faiss_store import faiss_store
+            candidates = faiss_store.search(query=query, top_k=15)
+            
+            if candidates:
+                for c in candidates:
+                    doc_owner = c.get("user_id", "PUBLIC")
+                    # Patient Resource Isolation Authorization Check
+                    if doc_owner != "PUBLIC" and user_id and user_id != "ADMIN" and doc_owner != user_id:
+                        # Unauthorized: Filter out another patient's private chunk!
+                        continue
+                    
+                    authorized_results.append({
+                        "chunk_id": c["chunk_id"],
+                        "doc_id": c["doc_id"],
+                        "topic": c.get("topic", "Knowledge Chunk"),
+                        "content": c.get("content", ""),
+                        "source": c.get("source", ""),
+                        "score": c.get("score", 0.0)
+                    })
+
+                # Sort by vector similarity score descending
+                authorized_results.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+                if authorized_results:
+                    return authorized_results[:10]
+
+        except Exception as e:
+            print(f"[FAISS Search Warning] Falling back to SQLite term match: {e}")
+
+        # Fallback: SQLite Keyword Search if FAISS index empty or error
         q = query.lower()
         stop_words = {"policy", "hospital", "general", "rules", "guidelines", "about", "what", "with", "from"}
         query_terms = [t for t in q.split() if len(t) > 3 and t not in stop_words]
@@ -1077,41 +1275,29 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # 1. Search Admin-Uploaded Chunked Hospital Documents (scored by term overlap)
-            cursor.execute("SELECT chunk_id, chunk_title, chunk_text, doc_id FROM hospital_doc_chunks")
+            cursor.execute("SELECT id, title, category, content FROM hospital_documents")
             for r in cursor.fetchall():
-                title = r["chunk_title"] or ""
-                text = r["chunk_text"] or ""
+                title = r["title"] or ""
+                text = r["content"] or ""
                 full_text = f"{title} {text}".lower()
-                if not query_terms:
-                    score = 0
-                else:
-                    matched = sum(1 for term in query_terms if term in full_text)
-                    req = len(query_terms) if len(query_terms) > 1 else 1
-                    score = matched if matched >= req else 0
-                if score > 0:
-                    scored_results.append((score, {
-                        "chunk_id": r["chunk_id"],
-                        "doc_id": r["doc_id"],
-                        "topic": f"Doc Chunk: {title}",
-                        "content": text,
-                        "source": f"hospital_doc:{r['doc_id']}"
+                matched = sum(1 for term in query_terms if term in full_text) if query_terms else 0
+                if matched > 0 or not query_terms:
+                    scored_results.append((matched, {
+                        "chunk_id": f"HDOC-{r['id']}",
+                        "doc_id": r["id"],
+                        "topic": f"Doc: {title}",
+                        "content": text[:500],
+                        "source": f"hospital_doc:{r['id']}"
                     }))
 
-            # 2. Search seed Knowledge Base (scored by term overlap)
             cursor.execute("SELECT id, topic, content FROM knowledge_base")
             for r in cursor.fetchall():
                 topic = r["topic"] or ""
                 content = r["content"] or ""
                 full_text = f"{topic} {content}".lower()
-                if not query_terms:
-                    score = 0
-                else:
-                    matched = sum(1 for term in query_terms if term in full_text)
-                    req = len(query_terms) if len(query_terms) > 1 else 1
-                    score = matched if matched >= req else 0
-                if score > 0:
-                    scored_results.append((score, {
+                matched = sum(1 for term in query_terms if term in full_text) if query_terms else 0
+                if matched > 0 or not query_terms:
+                    scored_results.append((matched, {
                         "chunk_id": f"kb_{r['id']}",
                         "doc_id": "kb",
                         "topic": topic,
@@ -1119,7 +1305,6 @@ class Database:
                         "source": "knowledge_base"
                     }))
 
-        # Sort by score descending, return top 10 most relevant results
         scored_results.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored_results[:10]]
 

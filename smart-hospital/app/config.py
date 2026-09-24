@@ -28,6 +28,14 @@ class Settings:
     RAG_CHUNK_SIZE: int = int(os.getenv("RAG_CHUNK_SIZE", "400"))
     RAG_CHUNK_OVERLAP: int = int(os.getenv("RAG_CHUNK_OVERLAP", "80"))
 
+    # Gemini Live Native Voice Configuration
+    GEMINI_LIVE_MODEL: str = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
+    GEMINI_VOICE_NAME: str = os.getenv("GEMINI_VOICE_NAME", "Aoede")
+
+    @property
+    def GEMINI_API_KEY(self) -> str:
+        return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+
     def get_llm_config(self) -> dict:
         """
         Dynamically parse LLM provider, model name, API key, and API base URL

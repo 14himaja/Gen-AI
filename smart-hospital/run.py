@@ -21,7 +21,7 @@ def run_server():
     """Start the FastAPI server."""
     print(f"Starting {settings.APP_NAME} on http://{settings.HOST}:{settings.PORT}")
     print(f"Interactive API documentation available at http://{settings.HOST}:{settings.PORT}/docs")
-    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True)
+    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True, reload_dirs=["app"])
 
 
 async def terminal_chat(user_id: str):
